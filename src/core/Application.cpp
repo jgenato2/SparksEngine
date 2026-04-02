@@ -4,23 +4,268 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <limits>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
+#include <assimp/config.h>
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <imgui.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+#include <tinyfiledialogs.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 
 #include "sparks/core/CubeProperties.hpp"
 #include "sparks/render/Renderer.hpp"
 #include "sparks/ui/PropertyPanel.hpp"
+
+namespace {
+
+constexpr float kMinCameraZoom = 1.5f;
+constexpr float kMaxCameraZoom = 250.0f;
+constexpr float kCameraFarPlane = 1000.0f;
+
+std::string formatVec3(const glm::vec3& value) {
+    char buffer[96];
+    std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", value.x, value.y, value.z);
+    return std::string(buffer);
+}
+
+float importedModelFocusZoom(const sparks::render::ImportedModelData& model) {
+    const glm::vec3 extent = glm::max(glm::abs(model.dimensions), glm::vec3(1.0f));
+    const float radius = glm::compMax(extent) * 0.5f;
+    const float depth = std::abs(model.position.z) + radius;
+    return std::clamp(depth * 2.5f, kMinCameraZoom, kMaxCameraZoom);
+}
+
+float readFbxUnitScale(const aiScene* scene) {
+    if (scene == nullptr || scene->mMetaData == nullptr) {
+        return 1.0f;
+    }
+
+    ai_real unitScaleFactor = 0.0;
+    if (!scene->mMetaData->Get("UnitScaleFactor", unitScaleFactor) || unitScaleFactor <= 0.0) {
+        return 1.0f;
+    }
+
+    return static_cast<float>(unitScaleFactor / 100.0);
+}
+
+glm::mat4 toGlmMatrix(const aiMatrix4x4& matrix) {
+    glm::mat4 result(1.0f);
+    result[0][0] = matrix.a1;
+    result[1][0] = matrix.a2;
+    result[2][0] = matrix.a3;
+    result[3][0] = matrix.a4;
+    result[0][1] = matrix.b1;
+    result[1][1] = matrix.b2;
+    result[2][1] = matrix.b3;
+    result[3][1] = matrix.b4;
+    result[0][2] = matrix.c1;
+    result[1][2] = matrix.c2;
+    result[2][2] = matrix.c3;
+    result[3][2] = matrix.c4;
+    result[0][3] = matrix.d1;
+    result[1][3] = matrix.d2;
+    result[2][3] = matrix.d3;
+    result[3][3] = matrix.d4;
+    return result;
+}
+
+const aiNode* findMeshNode(const aiNode* node, const unsigned int meshIndex) {
+    if (node == nullptr) {
+        return nullptr;
+    }
+
+    for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
+        if (node->mMeshes[i] == meshIndex) {
+            return node;
+        }
+    }
+
+    for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+        if (const aiNode* found = findMeshNode(node->mChildren[i], meshIndex)) {
+            return found;
+        }
+    }
+
+    return nullptr;
+}
+
+bool findMeshGlobalTransform(const aiNode* currentNode, const aiNode* targetNode, const glm::mat4& parentTransform, glm::mat4& globalTransform) {
+    if (currentNode == nullptr) {
+        return false;
+    }
+
+    const glm::mat4 currentTransform = parentTransform * toGlmMatrix(currentNode->mTransformation);
+    if (currentNode == targetNode) {
+        globalTransform = currentTransform;
+        return true;
+    }
+
+    for (unsigned int i = 0; i < currentNode->mNumChildren; ++i) {
+        if (findMeshGlobalTransform(currentNode->mChildren[i], targetNode, currentTransform, globalTransform)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::optional<sparks::render::ImportedModelData> loadFbxModel(const std::string& filePath, std::string& errorMessage) {
+    Assimp::Importer importer;
+    importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
+    const aiScene* scene = importer.ReadFile(
+        filePath,
+        aiProcess_Triangulate |
+            aiProcess_GenSmoothNormals |
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_ImproveCacheLocality);
+
+    if (scene == nullptr || !scene->HasMeshes()) {
+        errorMessage = importer.GetErrorString();
+        return std::nullopt;
+    }
+
+    const aiMesh* mesh = scene->mMeshes[0];
+    if (mesh == nullptr || mesh->mNumVertices == 0 || mesh->mNumFaces == 0) {
+        errorMessage = "FBX has no valid mesh data.";
+        return std::nullopt;
+    }
+
+    const aiNode* meshNode = findMeshNode(scene->mRootNode, 0);
+    glm::mat4 meshGlobalTransform(1.0f);
+    if (meshNode != nullptr) {
+        findMeshGlobalTransform(scene->mRootNode, meshNode, glm::mat4(1.0f), meshGlobalTransform);
+    }
+    const float unitScale = readFbxUnitScale(scene);
+
+    sparks::render::ImportedModelData model;
+    model.vertices.reserve(static_cast<std::size_t>(mesh->mNumVertices) * 8);
+    glm::vec3 boundsMin(std::numeric_limits<float>::max());
+    glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
+
+    for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+        const aiVector3D p = mesh->mVertices[i];
+        const aiVector3D n = mesh->HasNormals() ? mesh->mNormals[i] : aiVector3D(0.0f, 1.0f, 0.0f);
+        const aiVector3D uv = mesh->HasTextureCoords(0) ? mesh->mTextureCoords[0][i] : aiVector3D(0.0f, 0.0f, 0.0f);
+        const glm::vec3 localPosition(p.x, p.y, p.z);
+        const glm::vec3 localNormal = glm::normalize(glm::vec3(n.x, n.y, n.z));
+        boundsMin = glm::min(boundsMin, localPosition);
+        boundsMax = glm::max(boundsMax, localPosition);
+
+        model.vertices.push_back(localPosition.x);
+        model.vertices.push_back(localPosition.y);
+        model.vertices.push_back(localPosition.z);
+        model.vertices.push_back(localNormal.x);
+        model.vertices.push_back(localNormal.y);
+        model.vertices.push_back(localNormal.z);
+        model.vertices.push_back(uv.x);
+        model.vertices.push_back(uv.y);
+    }
+
+    aiVector3D scaling;
+    aiVector3D position;
+    aiQuaternion rotation;
+    aiMatrix4x4 transform = aiMatrix4x4(
+        meshGlobalTransform[0][0], meshGlobalTransform[1][0], meshGlobalTransform[2][0], meshGlobalTransform[3][0],
+        meshGlobalTransform[0][1], meshGlobalTransform[1][1], meshGlobalTransform[2][1], meshGlobalTransform[3][1],
+        meshGlobalTransform[0][2], meshGlobalTransform[1][2], meshGlobalTransform[2][2], meshGlobalTransform[3][2],
+        meshGlobalTransform[0][3], meshGlobalTransform[1][3], meshGlobalTransform[2][3], meshGlobalTransform[3][3]);
+    transform.Decompose(scaling, rotation, position);
+
+    model.position = glm::vec3(position.x, position.y, position.z) * unitScale;
+    model.scale = glm::vec3(scaling.x, scaling.y, scaling.z) * unitScale;
+    model.rotationEulerDegrees = glm::degrees(glm::eulerAngles(glm::quat(rotation.w, rotation.x, rotation.y, rotation.z)));
+    model.dimensions = (boundsMax - boundsMin) * glm::abs(model.scale);
+
+    for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
+        const aiFace& face = mesh->mFaces[f];
+        if (face.mNumIndices != 3) {
+            continue;
+        }
+        model.indices.push_back(face.mIndices[0]);
+        model.indices.push_back(face.mIndices[1]);
+        model.indices.push_back(face.mIndices[2]);
+    }
+
+    model.textureWidth = 1;
+    model.textureHeight = 1;
+    model.textureRgba = {255, 255, 255, 255};
+
+    if (scene->HasMaterials() && mesh->mMaterialIndex < scene->mNumMaterials) {
+        const aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
+        aiString texPath;
+        if (material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS) {
+            const std::string texRef = texPath.C_Str();
+            int width = 0;
+            int height = 0;
+            int channels = 0;
+            stbi_uc* pixels = nullptr;
+            stbi_set_flip_vertically_on_load(true);
+
+            const aiTexture* embedded = scene->GetEmbeddedTexture(texRef.c_str());
+            if (embedded != nullptr) {
+                if (embedded->mHeight == 0) {
+                    pixels = stbi_load_from_memory(
+                        reinterpret_cast<const stbi_uc*>(embedded->pcData),
+                        static_cast<int>(embedded->mWidth),
+                        &width,
+                        &height,
+                        &channels,
+                        4);
+                } else {
+                    width = static_cast<int>(embedded->mWidth);
+                    height = static_cast<int>(embedded->mHeight);
+                    model.textureRgba.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4);
+                    for (int y = 0; y < height; ++y) {
+                        for (int x = 0; x < width; ++x) {
+                            const aiTexel& t = embedded->pcData[y * width + x];
+                            const int flippedY = height - 1 - y;
+                            const std::size_t idx = (static_cast<std::size_t>(flippedY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 4;
+                            model.textureRgba[idx + 0] = t.r;
+                            model.textureRgba[idx + 1] = t.g;
+                            model.textureRgba[idx + 2] = t.b;
+                            model.textureRgba[idx + 3] = t.a;
+                        }
+                    }
+                    model.textureWidth = width;
+                    model.textureHeight = height;
+                }
+            } else {
+                const std::filesystem::path texturePath = std::filesystem::path(filePath).parent_path() / texRef;
+                pixels = stbi_load(texturePath.string().c_str(), &width, &height, &channels, 4);
+            }
+
+            if (pixels != nullptr) {
+                model.textureWidth = width;
+                model.textureHeight = height;
+                model.textureRgba.assign(pixels, pixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4);
+                stbi_image_free(pixels);
+            }
+
+            stbi_set_flip_vertically_on_load(false);
+        }
+    }
+
+    return model;
+}
+
+} // namespace
 
 namespace sparks::core {
 
@@ -80,6 +325,7 @@ int Application::run() {
     bool selectionDragging = false;
     ImVec2 selectionStart(0.0f, 0.0f);
     ImVec2 selectionEnd(0.0f, 0.0f);
+    std::string importStatus;
 
     renderer.initialize();
 
@@ -122,8 +368,43 @@ int Application::run() {
         ImGui::Begin("Workspace", nullptr, kWorkspaceFlags);
 
         if (ImGui::BeginMenuBar()) {
+            if (ImGui::BeginMenu("File")) {
+                if (ImGui::BeginMenu("Import")) {
+                    if (ImGui::MenuItem("FBX...")) {
+                        const char* patterns[] = {"*.fbx", "*.FBX"};
+                        const char* selectedPath = tinyfd_openFileDialog(
+                            "Import FBX",
+                            "",
+                            2,
+                            patterns,
+                            "FBX Files",
+                            0);
+
+                        if (selectedPath != nullptr) {
+                            std::string error;
+                            const auto imported = loadFbxModel(selectedPath, error);
+                            if (imported.has_value()) {
+                                renderer.setImportedModel(*imported);
+                                viewControls.panOffset = glm::vec2(imported->position.x, imported->position.y);
+                                viewControls.zoomDistance = importedModelFocusZoom(*imported);
+                                importStatus = std::string("Imported: ")
+                                    + std::filesystem::path(selectedPath).filename().string()
+                                    + " | Pos " + formatVec3(imported->position)
+                                    + " | Rot " + formatVec3(imported->rotationEulerDegrees)
+                                    + " | Scale " + formatVec3(imported->scale)
+                                    + " | Dim " + formatVec3(imported->dimensions);
+                            } else {
+                                importStatus = std::string("FBX import failed: ") + error;
+                            }
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+                ImGui::EndMenu();
+            }
+
             if (ImGui::BeginMenu("Camera")) {
-                ImGui::SliderFloat("Zoom", &viewControls.zoomDistance, 1.5f, 20.0f, "%.2f");
+                ImGui::SliderFloat("Zoom", &viewControls.zoomDistance, kMinCameraZoom, kMaxCameraZoom, "%.2f");
                 ImGui::DragFloat2("Pan", &viewControls.panOffset.x, 0.01f, -10.0f, 10.0f, "%.2f");
                 ImGui::DragFloat2("World Rotation", &viewControls.worldRotationDegrees.x, 0.5f, -180.0f, 180.0f, "%.1f deg");
                 ImGui::Checkbox("Pan Mode (Ctrl+P)", &panModeEnabled);
@@ -169,7 +450,7 @@ int Application::run() {
                     const bool viewportHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 
                     if (viewportHovered && io.MouseWheel != 0.0f) {
-                        viewControls.zoomDistance = std::clamp(viewControls.zoomDistance - io.MouseWheel * 0.35f, 1.5f, 20.0f);
+                        viewControls.zoomDistance = std::clamp(viewControls.zoomDistance - io.MouseWheel * 0.35f, kMinCameraZoom, kMaxCameraZoom);
                     }
 
                     if (viewportHovered && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
@@ -211,7 +492,7 @@ int Application::run() {
                         cameraPos,
                         cameraTarget,
                         glm::vec3(0.0f, 1.0f, 0.0f));
-                    const glm::mat4 projection = glm::perspective(glm::radians(50.0f), aspectRatio, 0.1f, 100.0f);
+                    const glm::mat4 projection = glm::perspective(glm::radians(50.0f), aspectRatio, 0.1f, kCameraFarPlane);
 
                     glm::mat4 world(1.0f);
                     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
@@ -551,17 +832,12 @@ int Application::run() {
 
                                 const float angleRadians = glm::radians(rotateAmountDeg);
                                 const glm::quat rotation = glm::angleAxis(angleRadians, rotationAxis);
-
-                                // Rotate the selection boundary box and move each object with it.
                                 const glm::vec3 relativePos = startObj.position - transformDragStartSelectedCenter;
                                 const glm::vec3 rotatedRelPos = rotation * relativePos;
                                 obj.position = transformDragStartSelectedCenter + rotatedRelPos;
-
-                                // Keep each object's local orientation fixed while rotating the boundary box.
                                 obj.rotationEulerDegrees = startObj.rotationEulerDegrees;
                             } else {
                                 const float scaleFactor = 1.0f + dragAmount * 0.004f;
-                                // Blender-like: scale both object size and pivot-relative layout.
                                 const glm::vec3 startRel = startObj.position - transformDragStartSelectedCenter;
                                 glm::vec3 scaledRel = startRel;
                                 glm::vec3 nextScale = startObj.scale;
@@ -863,6 +1139,12 @@ int Application::run() {
             "Tips: LMB Click=Select | LMB Drag=Box Multi-select | Drag Selected=Transform (%s) | W/E/R=Mode | Scroll=Zoom | RMB Drag=Rotate World | Ctrl+P=Pan Mode (%s)",
             modeLabel,
             panModeEnabled ? "ON" : "OFF");
+        if (!importStatus.empty()) {
+            ImGui::SameLine();
+            ImGui::TextUnformatted("|");
+            ImGui::SameLine();
+            ImGui::TextUnformatted(importStatus.c_str());
+        }
         ImGui::EndChild();
 
         ImGui::End();

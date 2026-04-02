@@ -14,6 +14,11 @@ endif()
 
 include(FetchContent)
 
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
 FetchContent_Declare(
   glfw
   GIT_REPOSITORY https://github.com/glfw/glfw.git
@@ -38,7 +43,25 @@ FetchContent_Declare(
   GIT_TAG v2.0.8
 )
 
-FetchContent_MakeAvailable(glfw glm imgui glad)
+FetchContent_Declare(
+  assimp
+  GIT_REPOSITORY https://github.com/assimp/assimp.git
+  GIT_TAG v5.4.3
+)
+
+FetchContent_Declare(
+  stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG master
+)
+
+FetchContent_Declare(
+  tinyfiledialogs
+  GIT_REPOSITORY https://github.com/native-toolkit/libtinyfiledialogs.git
+  GIT_TAG master
+)
+
+FetchContent_MakeAvailable(glfw glm imgui glad assimp stb tinyfiledialogs)
 
 find_package(OpenGL REQUIRED)
 
@@ -55,6 +78,16 @@ add_library(imgui_lib STATIC
   ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
 )
+
+add_library(tinyfiledialogs_lib STATIC
+  ${tinyfiledialogs_SOURCE_DIR}/tinyfiledialogs.c
+)
+
+target_include_directories(tinyfiledialogs_lib PUBLIC ${tinyfiledialogs_SOURCE_DIR})
+
+if(MSVC)
+  set_property(TARGET tinyfiledialogs_lib PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
 
 target_include_directories(imgui_lib PUBLIC
   ${imgui_SOURCE_DIR}
@@ -78,7 +111,8 @@ add_executable(SparksEngine
 )
 
 target_include_directories(SparksEngine PRIVATE include)
-target_link_libraries(SparksEngine PRIVATE glfw glm::glm glad imgui_lib OpenGL::GL)
+target_include_directories(SparksEngine PRIVATE ${stb_SOURCE_DIR})
+target_link_libraries(SparksEngine PRIVATE glfw glm::glm glad imgui_lib tinyfiledialogs_lib assimp OpenGL::GL)
 
 if(MSVC)
   set_property(TARGET SparksEngine PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")

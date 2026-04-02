@@ -13,6 +13,8 @@
 
 namespace {
 
+constexpr float kCameraFarPlane = 1000.0f;
+
 unsigned int compileShader(unsigned int shaderType, const char* source) {
     const unsigned int shader = glCreateShader(shaderType);
     glShaderSource(shader, 1, &source, nullptr);
@@ -98,6 +100,72 @@ unsigned int createProgram() {
     return program;
 }
 
+unsigned int createTexturedProgram() {
+    static constexpr const char* kVertexShader = R"(
+        #version 460 core
+        layout (location = 0) in vec3 aPos;
+        layout (location = 1) in vec3 aNormal;
+        layout (location = 2) in vec2 aUv;
+
+        uniform mat4 uMvp;
+        uniform mat4 uModel;
+        out vec3 vWorldPos;
+        out vec3 vWorldNormal;
+        out vec2 vUv;
+
+        void main() {
+            vWorldPos = vec3(uModel * vec4(aPos, 1.0));
+            mat3 normalMat = mat3(transpose(inverse(uModel)));
+            vWorldNormal = normalize(normalMat * aNormal);
+            vUv = aUv;
+            gl_Position = uMvp * vec4(aPos, 1.0);
+        }
+    )";
+
+    static constexpr const char* kFragmentShader = R"(
+        #version 460 core
+        out vec4 FragColor;
+        in vec3 vWorldPos;
+        in vec3 vWorldNormal;
+        in vec2 vUv;
+
+        uniform sampler2D uTex;
+        uniform vec3 uLightPos;
+
+        void main() {
+            vec4 base = texture(uTex, vUv);
+            vec3 n = normalize(vWorldNormal);
+            vec3 l = normalize(uLightPos - vWorldPos);
+            float ndl = max(dot(n, l), 0.0);
+            float lit = mix(0.35, 1.25, pow(ndl, 0.9));
+            FragColor = vec4(base.rgb * lit, base.a);
+        }
+    )";
+
+    const unsigned int vertexShader = compileShader(GL_VERTEX_SHADER, kVertexShader);
+    const unsigned int fragmentShader = compileShader(GL_FRAGMENT_SHADER, kFragmentShader);
+
+    const unsigned int program = glCreateProgram();
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    glLinkProgram(program);
+
+    int success = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (success == GL_FALSE) {
+        int length = 0;
+        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
+        std::string infoLog(static_cast<std::size_t>(length), '\0');
+        glGetProgramInfoLog(program, length, nullptr, infoLog.data());
+        throw std::runtime_error("Program link failed: " + infoLog);
+    }
+
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
+    return program;
+}
+
 }  // namespace
 
 namespace sparks::render {
@@ -128,13 +196,96 @@ Renderer::~Renderer() {
     if (m_gridVao != 0) {
         glDeleteVertexArrays(1, &m_gridVao);
     }
+
+    if (m_importTexture != 0) {
+        glDeleteTextures(1, &m_importTexture);
+    }
+
+    if (m_importEbo != 0) {
+        glDeleteBuffers(1, &m_importEbo);
+    }
+
+    if (m_importVbo != 0) {
+        glDeleteBuffers(1, &m_importVbo);
+    }
+
+    if (m_importVao != 0) {
+        glDeleteVertexArrays(1, &m_importVao);
+    }
+
+    if (m_texturedProgram != 0) {
+        glDeleteProgram(m_texturedProgram);
+    }
 }
 
 void Renderer::initialize() {
     m_shaderProgram = createProgram();
+    m_texturedProgram = createTexturedProgram();
     createCubeResources();
     createGridResources();
     createFramebuffer();
+}
+
+void Renderer::setImportedModel(const ImportedModelData& model) {
+    if (m_importTexture == 0) {
+        glGenTextures(1, &m_importTexture);
+    }
+    if (m_importVao == 0) {
+        glGenVertexArrays(1, &m_importVao);
+    }
+    if (m_importVbo == 0) {
+        glGenBuffers(1, &m_importVbo);
+    }
+    if (m_importEbo == 0) {
+        glGenBuffers(1, &m_importEbo);
+    }
+
+    glBindVertexArray(m_importVao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_importVbo);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<long long>(model.vertices.size() * sizeof(float)),
+        model.vertices.data(),
+        GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_importEbo);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER,
+        static_cast<long long>(model.indices.size() * sizeof(unsigned int)),
+        model.indices.data(),
+        GL_STATIC_DRAW);
+
+    constexpr int stride = 8 * static_cast<int>(sizeof(float));
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(6 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+
+    glBindTexture(GL_TEXTURE_2D, m_importTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA8,
+        model.textureWidth,
+        model.textureHeight,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        model.textureRgba.data());
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    glBindVertexArray(0);
+
+    m_importIndexCount = static_cast<int>(model.indices.size());
+    m_importPosition = model.position;
+    m_importRotationEuler = model.rotationEulerDegrees;
+    m_importScale = model.scale;
 }
 
 void Renderer::setViewportSize(const int width, const int height) {
@@ -175,7 +326,7 @@ void Renderer::render(
         cameraPos,
         cameraTarget,
         glm::vec3(0.0f, 1.0f, 0.0f));
-    const glm::mat4 projection = glm::perspective(glm::radians(50.0f), aspectRatio, 0.1f, 100.0f);
+    const glm::mat4 projection = glm::perspective(glm::radians(50.0f), aspectRatio, 0.1f, kCameraFarPlane);
 
     glm::mat4 world(1.0f);
     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
@@ -281,6 +432,38 @@ void Renderer::render(
         }
 
         drawCube(model, drawColor, props.wireframe, 1.0f, 1.0f);
+    }
+
+    if (m_importVao != 0 && m_importTexture != 0 && m_importIndexCount > 0) {
+        glUseProgram(m_texturedProgram);
+
+        const int mvpLocT = glGetUniformLocation(m_texturedProgram, "uMvp");
+        const int modelLocT = glGetUniformLocation(m_texturedProgram, "uModel");
+        const int lightPosLocT = glGetUniformLocation(m_texturedProgram, "uLightPos");
+        const int texLocT = glGetUniformLocation(m_texturedProgram, "uTex");
+
+        glm::mat4 model(1.0f);
+        model = glm::translate(model, m_importPosition);
+        const glm::vec3 rotRad = glm::radians(m_importRotationEuler);
+        model = glm::rotate(model, rotRad.x, glm::vec3(1.0f, 0.0f, 0.0f));
+        model = glm::rotate(model, rotRad.y, glm::vec3(0.0f, 1.0f, 0.0f));
+        model = glm::rotate(model, rotRad.z, glm::vec3(0.0f, 0.0f, 1.0f));
+        model = glm::scale(model, m_importScale);
+
+        const glm::mat4 worldModel = world * model;
+        const glm::mat4 mvp = projection * view * worldModel;
+
+        glUniformMatrix4fv(mvpLocT, 1, GL_FALSE, glm::value_ptr(mvp));
+        glUniformMatrix4fv(modelLocT, 1, GL_FALSE, glm::value_ptr(worldModel));
+        glUniform3f(lightPosLocT, 5.5f, 6.5f, 4.0f);
+        glUniform1i(texLocT, 0);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_importTexture);
+        glBindVertexArray(m_importVao);
+        glDrawElements(GL_TRIANGLES, m_importIndexCount, GL_UNSIGNED_INT, nullptr);
+
+        glUseProgram(m_shaderProgram);
     }
 
     glBindVertexArray(0);
