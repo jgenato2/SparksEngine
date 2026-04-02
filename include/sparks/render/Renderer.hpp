@@ -44,7 +44,9 @@ private:
     unsigned int m_shaderProgram{0};
     unsigned int m_gridVao{0};
     unsigned int m_gridVbo{0};
-    int m_gridVertexCount{0};
+    int m_gridRegularCount{0};
+    int m_gridAxisXStart{0};
+    int m_gridAxisYStart{0};
 
     unsigned int m_fbo{0};
     unsigned int m_colorTexture{0};

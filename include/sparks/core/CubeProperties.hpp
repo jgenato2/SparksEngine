@@ -9,7 +9,7 @@ struct CubeProperties {
     glm::vec3 backgroundColor{0.08f, 0.09f, 0.11f};
     glm::vec3 position{0.0f, 0.0f, 0.0f};
     glm::vec3 rotationEulerDegrees{20.0f, 35.0f, 0.0f};
-    float scale{1.0f};
+    glm::vec3 scale{1.0f, 1.0f, 1.0f};
     bool wireframe{false};
 };
 

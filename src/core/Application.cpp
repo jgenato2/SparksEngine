@@ -2,13 +2,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
@@ -36,19 +40,39 @@ Application::~Application() {
 }
 
 int Application::run() {
+    enum class TransformMode {
+        Move,
+        Rotate,
+        Scale,
+    };
+
+    enum class TransformAxis {
+        None,
+        X,
+        Y,
+        Z,
+    };
+
     std::array<sparks::core::CubeProperties, 2> sceneObjects{};
     sceneObjects[0].position = glm::vec3(-0.9f, 0.0f, 0.0f);
     sceneObjects[1].position = glm::vec3(0.9f, 0.0f, -0.8f);
     sceneObjects[1].baseColor = glm::vec3(0.93f, 0.55f, 0.24f);
     sceneObjects[1].rotationEulerDegrees = glm::vec3(12.0f, -24.0f, 0.0f);
-    sceneObjects[1].scale = 0.85f;
+    sceneObjects[1].scale = glm::vec3(0.85f, 0.85f, 0.85f);
 
-    std::array<bool, 2> selectedObjects{true, false};
+    std::array<bool, 2> selectedObjects{false, false};
 
     sparks::render::Renderer renderer;
     sparks::ui::PropertyPanel propertyPanel;
     sparks::render::ViewControls viewControls;
     bool panModeEnabled = false;
+    TransformMode transformMode = TransformMode::Move;
+    TransformAxis activeTransformAxis = TransformAxis::None;
+    bool transformDragging = false;
+    ImVec2 transformDragStartMouse(0.0f, 0.0f);
+    glm::vec2 transformDragStartWorldRotation(0.0f, 0.0f);
+    glm::vec3 transformDragStartSelectedCenter(0.0f);
+    std::array<sparks::core::CubeProperties, 2> transformDragStartObjects{};
     bool selectionDragging = false;
     ImVec2 selectionStart(0.0f, 0.0f);
     ImVec2 selectionEnd(0.0f, 0.0f);
@@ -65,6 +89,17 @@ int Application::run() {
         ImGuiIO& io = ImGui::GetIO();
         if (ImGui::IsKeyPressed(ImGuiKey_P, false) && io.KeyCtrl) {
             panModeEnabled = !panModeEnabled;
+        }
+        if (!io.WantTextInput) {
+            if (ImGui::IsKeyPressed(ImGuiKey_W, false)) {
+                transformMode = TransformMode::Move;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+                transformMode = TransformMode::Rotate;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+                transformMode = TransformMode::Scale;
+            }
         }
 
         static constexpr ImGuiWindowFlags kWorkspaceFlags =
@@ -94,6 +129,19 @@ int Application::run() {
                     panModeEnabled = false;
                 }
 
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Transform")) {
+                if (ImGui::MenuItem("Move (W)", nullptr, transformMode == TransformMode::Move)) {
+                    transformMode = TransformMode::Move;
+                }
+                if (ImGui::MenuItem("Rotate (E)", nullptr, transformMode == TransformMode::Rotate)) {
+                    transformMode = TransformMode::Rotate;
+                }
+                if (ImGui::MenuItem("Scale (R)", nullptr, transformMode == TransformMode::Scale)) {
+                    transformMode = TransformMode::Scale;
+                }
                 ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
@@ -213,10 +261,262 @@ int Application::run() {
                         return true;
                     };
 
-                    if (sceneImageHovered && !panModeEnabled && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        selectionDragging = true;
-                        selectionStart = io.MousePos;
-                        selectionEnd = io.MousePos;
+                    auto projectPointToScreen = [&](const glm::vec3& worldPosition) {
+                        const glm::vec4 clip = projection * view * world * glm::vec4(worldPosition, 1.0f);
+                        if (clip.w <= 0.0f) {
+                            return ImVec2(-10000.0f, -10000.0f);
+                        }
+
+                        const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                        const float sx = imgMin.x + (ndc.x * 0.5f + 0.5f) * viewportSize.x;
+                        const float sy = imgMin.y + (1.0f - (ndc.y * 0.5f + 0.5f)) * viewportSize.y;
+                        return ImVec2(sx, sy);
+                    };
+
+                    auto axisDirection2D = [&](TransformAxis axis) {
+                        glm::vec3 axisVec(1.0f, 0.0f, 0.0f);
+                        if (axis == TransformAxis::Y) {
+                            axisVec = glm::vec3(0.0f, 1.0f, 0.0f);
+                        } else if (axis == TransformAxis::Z) {
+                            axisVec = glm::vec3(0.0f, 0.0f, 1.0f);
+                        }
+
+                        const glm::vec3 rotated = glm::normalize(glm::vec3(world * glm::vec4(axisVec, 0.0f)));
+                        ImVec2 dir(rotated.x, -rotated.y);
+                        const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                        if (len < 0.0001f) {
+                            return ImVec2(1.0f, 0.0f);
+                        }
+                        return ImVec2(dir.x / len, dir.y / len);
+                    };
+
+                    auto distanceToSegmentSq = [](const ImVec2& p, const ImVec2& a, const ImVec2& b) {
+                        const float abx = b.x - a.x;
+                        const float aby = b.y - a.y;
+                        const float apx = p.x - a.x;
+                        const float apy = p.y - a.y;
+                        const float abLenSq = abx * abx + aby * aby;
+                        const float t = (abLenSq > 0.0f)
+                            ? std::clamp((apx * abx + apy * aby) / abLenSq, 0.0f, 1.0f)
+                            : 0.0f;
+                        const float cx = a.x + abx * t;
+                        const float cy = a.y + aby * t;
+                        const float dx = p.x - cx;
+                        const float dy = p.y - cy;
+                        return dx * dx + dy * dy;
+                    };
+
+                    int selectedCount = 0;
+                    glm::vec3 selectedCenter(0.0f);
+                    glm::vec3 boundMin(std::numeric_limits<float>::max());
+                    glm::vec3 boundMax(std::numeric_limits<float>::lowest());
+                    for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
+                        if (selectedObjects[static_cast<std::size_t>(i)]) {
+                            const auto& obj = sceneObjects[static_cast<std::size_t>(i)];
+                            selectedCenter += obj.position;
+                            const glm::vec3 extent = obj.scale; // Cube half-extent per axis
+                            boundMin = glm::min(boundMin, obj.position - extent);
+                            boundMax = glm::max(boundMax, obj.position + extent);
+                            ++selectedCount;
+                        }
+                    }
+                    const bool hasSelection = selectedCount > 0;
+                    if (hasSelection) {
+                        selectedCenter /= static_cast<float>(selectedCount);
+                        selectedCenter = (boundMin + boundMax) * 0.5f; // Use actual bounding box center
+                    }
+
+                    const ImVec2 gizmoCenter = hasSelection ? projectPointToScreen(selectedCenter) : ImVec2(-10000.0f, -10000.0f);
+                    const float gizmoLength = 64.0f;
+                    const ImVec2 xDir2D = axisDirection2D(TransformAxis::X);
+                    const ImVec2 yDir2D = axisDirection2D(TransformAxis::Y);
+                    const ImVec2 zDir2D = axisDirection2D(TransformAxis::Z);
+                    const ImVec2 gizmoXTip(gizmoCenter.x + xDir2D.x * gizmoLength, gizmoCenter.y + xDir2D.y * gizmoLength);
+                    const ImVec2 gizmoYTip(gizmoCenter.x + yDir2D.x * gizmoLength, gizmoCenter.y + yDir2D.y * gizmoLength);
+                    const ImVec2 gizmoZTip(gizmoCenter.x + zDir2D.x * gizmoLength, gizmoCenter.y + zDir2D.y * gizmoLength);
+                    auto ringRadiusForAxis = [&](TransformAxis axis) {
+                        if (axis == TransformAxis::X) {
+                            return 54.0f;
+                        }
+                        if (axis == TransformAxis::Y) {
+                            return 64.0f;
+                        }
+                        return 74.0f;
+                    };
+
+                    TransformAxis hoveredGizmoAxis = TransformAxis::None;
+                    if (sceneImageHovered && hasSelection) {
+                        float bestDistSq = 10.0f * 10.0f;
+                        if (transformMode == TransformMode::Rotate) {
+                            bestDistSq = 10.0f * 10.0f;
+                            const float dx = io.MousePos.x - gizmoCenter.x;
+                            const float dy = io.MousePos.y - gizmoCenter.y;
+                            const float mouseRadius = std::sqrt(dx * dx + dy * dy);
+
+                            const float ringDistX = std::abs(mouseRadius - ringRadiusForAxis(TransformAxis::X));
+                            if (ringDistX < bestDistSq) {
+                                bestDistSq = ringDistX;
+                                hoveredGizmoAxis = TransformAxis::X;
+                            }
+
+                            const float ringDistY = std::abs(mouseRadius - ringRadiusForAxis(TransformAxis::Y));
+                            if (ringDistY < bestDistSq) {
+                                bestDistSq = ringDistY;
+                                hoveredGizmoAxis = TransformAxis::Y;
+                            }
+
+                            const float ringDistZ = std::abs(mouseRadius - ringRadiusForAxis(TransformAxis::Z));
+                            if (ringDistZ < bestDistSq) {
+                                bestDistSq = ringDistZ;
+                                hoveredGizmoAxis = TransformAxis::Z;
+                            }
+                        } else {
+                            const float dx = io.MousePos.x - gizmoCenter.x;
+                            const float dy = io.MousePos.y - gizmoCenter.y;
+                            if (dx * dx + dy * dy <= 14.0f * 14.0f) {
+                                hoveredGizmoAxis = TransformAxis::X;
+                                bestDistSq = 0.0f;
+                            }
+
+                            const float distX = distanceToSegmentSq(io.MousePos, gizmoCenter, gizmoXTip);
+                            if (distX < bestDistSq) {
+                                bestDistSq = distX;
+                                hoveredGizmoAxis = TransformAxis::X;
+                            }
+
+                            const float distY = distanceToSegmentSq(io.MousePos, gizmoCenter, gizmoYTip);
+                            if (distY < bestDistSq) {
+                                bestDistSq = distY;
+                                hoveredGizmoAxis = TransformAxis::Y;
+                            }
+
+                            const float distZ = distanceToSegmentSq(io.MousePos, gizmoCenter, gizmoZTip);
+                            if (distZ < bestDistSq) {
+                                hoveredGizmoAxis = TransformAxis::Z;
+                            }
+                        }
+                    }
+
+                    const ImVec2 modeButtonsMin(imgMax.x - 220.0f, imgMin.y);
+                    const ImVec2 modeButtonsMax(imgMax.x, imgMin.y + 40.0f);
+                    const bool clickInModeButtons = (io.MousePos.x >= modeButtonsMin.x && io.MousePos.x <= modeButtonsMax.x &&
+                                                     io.MousePos.y >= modeButtonsMin.y && io.MousePos.y <= modeButtonsMax.y);
+                    
+                    ImGui::SetCursorScreenPos(ImVec2(imgMax.x - 210.0f, imgMin.y + 10.0f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+                    if (ImGui::SmallButton("Move")) {
+                        transformMode = TransformMode::Move;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Rotate")) {
+                        transformMode = TransformMode::Rotate;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Scale")) {
+                        transformMode = TransformMode::Scale;
+                    }
+                    ImGui::PopStyleVar();
+
+                        if (sceneImageHovered && !panModeEnabled && !clickInModeButtons && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                            if (hasSelection && hoveredGizmoAxis != TransformAxis::None) {
+                                transformDragging = true;
+                                activeTransformAxis = hoveredGizmoAxis;
+                                transformDragStartMouse = io.MousePos;
+                                transformDragStartWorldRotation = viewControls.worldRotationDegrees;
+                                transformDragStartSelectedCenter = selectedCenter;
+                                transformDragStartObjects = sceneObjects;
+                            } else {
+                                selectionDragging = true;
+                                selectionStart = io.MousePos;
+                                selectionEnd = io.MousePos;
+                            }
+                        }
+
+                    if (transformDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                        ImVec2 axisDir = xDir2D;
+                        if (activeTransformAxis == TransformAxis::Y) {
+                            axisDir = yDir2D;
+                        } else if (activeTransformAxis == TransformAxis::Z) {
+                            axisDir = zDir2D;
+                        }
+
+                        const ImVec2 delta(io.MousePos.x - transformDragStartMouse.x, io.MousePos.y - transformDragStartMouse.y);
+                        const float dragAmount = delta.x * axisDir.x + delta.y * axisDir.y;
+
+                        float rotateAmountDeg = 0.0f;
+                        if (transformMode == TransformMode::Rotate) {
+                            const ImVec2 startVec(transformDragStartMouse.x - gizmoCenter.x, transformDragStartMouse.y - gizmoCenter.y);
+                            const ImVec2 curVec(io.MousePos.x - gizmoCenter.x, io.MousePos.y - gizmoCenter.y);
+                            const float startLen = std::sqrt(startVec.x * startVec.x + startVec.y * startVec.y);
+                            const float curLen = std::sqrt(curVec.x * curVec.x + curVec.y * curVec.y);
+                            if (startLen > 0.001f && curLen > 0.001f) {
+                                const ImVec2 s(startVec.x / startLen, startVec.y / startLen);
+                                const ImVec2 c(curVec.x / curLen, curVec.y / curLen);
+                                const float dot = std::clamp(s.x * c.x + s.y * c.y, -1.0f, 1.0f);
+                                const float cross = s.x * c.y - s.y * c.x;
+                                const float angleRad = std::atan2(cross, dot);
+                                rotateAmountDeg = -glm::degrees(angleRad) * 0.75f;
+                            }
+                        }
+
+                        for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
+                            if (!selectedObjects[static_cast<std::size_t>(i)]) {
+                                continue;
+                            }
+
+                            const auto& startObj = transformDragStartObjects[static_cast<std::size_t>(i)];
+                            auto& obj = sceneObjects[static_cast<std::size_t>(i)];
+
+                            if (transformMode == TransformMode::Move) {
+                                const float moveFactor = 0.004f * viewControls.zoomDistance;
+                                if (activeTransformAxis == TransformAxis::X) {
+                                    obj.position.x = startObj.position.x + dragAmount * moveFactor;
+                                } else if (activeTransformAxis == TransformAxis::Y) {
+                                    obj.position.y = startObj.position.y + dragAmount * moveFactor;
+                                } else if (activeTransformAxis == TransformAxis::Z) {
+                                    obj.position.z = startObj.position.z + dragAmount * moveFactor;
+                                }
+                            } else if (transformMode == TransformMode::Rotate) {
+                                glm::vec3 rotationAxis(0.0f, 0.0f, 1.0f);
+                                if (activeTransformAxis == TransformAxis::X) {
+                                    rotationAxis = glm::vec3(1.0f, 0.0f, 0.0f);
+                                } else if (activeTransformAxis == TransformAxis::Y) {
+                                    rotationAxis = glm::vec3(0.0f, 1.0f, 0.0f);
+                                } else if (activeTransformAxis == TransformAxis::Z) {
+                                    rotationAxis = glm::vec3(0.0f, 0.0f, 1.0f);
+                                }
+
+                                const float angleRadians = glm::radians(rotateAmountDeg);
+                                const glm::quat rotation = glm::angleAxis(angleRadians, rotationAxis);
+
+                                const glm::vec3 relativePos = startObj.position - transformDragStartSelectedCenter;
+                                const glm::vec3 rotatedRelPos = rotation * relativePos;
+                                obj.position = transformDragStartSelectedCenter + rotatedRelPos;
+                            } else {
+                                const float scaleFactor = 1.0f + dragAmount * 0.004f;
+                                // Scale along active axis, pivoting each object relative to the boundary center.
+                                const glm::vec3 startRel = startObj.position - transformDragStartSelectedCenter;
+                                glm::vec3 scaledRel = startRel;
+                                glm::vec3 nextScale = startObj.scale;
+                                if (activeTransformAxis == TransformAxis::X) {
+                                    scaledRel.x = startRel.x * scaleFactor;
+                                    nextScale.x = std::clamp(startObj.scale.x * scaleFactor, 0.1f, 5.0f);
+                                } else if (activeTransformAxis == TransformAxis::Y) {
+                                    scaledRel.y = startRel.y * scaleFactor;
+                                    nextScale.y = std::clamp(startObj.scale.y * scaleFactor, 0.1f, 5.0f);
+                                } else if (activeTransformAxis == TransformAxis::Z) {
+                                    scaledRel.z = startRel.z * scaleFactor;
+                                    nextScale.z = std::clamp(startObj.scale.z * scaleFactor, 0.1f, 5.0f);
+                                }
+                                obj.position = transformDragStartSelectedCenter + scaledRel;
+                                obj.scale = nextScale;
+                            }
+                        }
+                    }
+
+                    if (transformDragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                        transformDragging = false;
+                        activeTransformAxis = TransformAxis::None;
                     }
 
                     if (selectionDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -235,6 +535,7 @@ int Application::run() {
 
                         static constexpr float kClickDragThreshold = 6.0f;
                         if (width < kClickDragThreshold && height < kClickDragThreshold) {
+                            // Click: select single object or deselect all
                             int bestIndex = -1;
                             float bestArea = std::numeric_limits<float>::max();
 
@@ -254,11 +555,13 @@ int Application::run() {
                                 }
                             }
 
+                            // Deselect all, then select closest object if found
                             std::fill(selectedObjects.begin(), selectedObjects.end(), false);
                             if (bestIndex >= 0) {
                                 selectedObjects[static_cast<std::size_t>(bestIndex)] = true;
                             }
                         } else {
+                            // Box select: deselect all first, then select objects within box
                             std::fill(selectedObjects.begin(), selectedObjects.end(), false);
                             for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
                                 ImVec2 boxMin(0.0f, 0.0f);
@@ -280,6 +583,79 @@ int Application::run() {
                         const ImVec2 rectMax(std::max(selectionStart.x, selectionEnd.x), std::max(selectionStart.y, selectionEnd.y));
                         drawList->AddRectFilled(rectMin, rectMax, IM_COL32(80, 140, 220, 45));
                         drawList->AddRect(rectMin, rectMax, IM_COL32(80, 170, 255, 220), 0.0f, 0, 1.5f);
+                    }
+
+                    if (hasSelection) {
+                        auto axisColor = [&](TransformAxis axis) {
+                            if (axis == TransformAxis::X) {
+                                return IM_COL32(235, 70, 70, 255);
+                            }
+                            if (axis == TransformAxis::Y) {
+                                return IM_COL32(75, 145, 240, 255);
+                            }
+                            return IM_COL32(90, 215, 90, 255);
+                        };
+
+                        auto isHighlighted = [&](TransformAxis axis) {
+                            return (hoveredGizmoAxis == axis) || (transformDragging && activeTransformAxis == axis);
+                        };
+
+                        const float centerRadius = 8.0f;
+                        drawList->AddCircleFilled(gizmoCenter, centerRadius, IM_COL32(240, 240, 245, 220), 24);
+
+                        const float thicknessX = isHighlighted(TransformAxis::X) ? 4.0f : 2.0f;
+                        const float thicknessY = isHighlighted(TransformAxis::Y) ? 4.0f : 2.0f;
+                        const float thicknessZ = isHighlighted(TransformAxis::Z) ? 4.0f : 2.0f;
+
+                        auto drawArrowHead = [&](const ImVec2& from, const ImVec2& to, ImU32 color) {
+                            ImVec2 d(to.x - from.x, to.y - from.y);
+                            const float len = std::sqrt(d.x * d.x + d.y * d.y);
+                            if (len < 0.001f) {
+                                return;
+                            }
+                            d.x /= len;
+                            d.y /= len;
+                            const ImVec2 n(-d.y, d.x);
+                            const float arrowLen = 10.0f;
+                            const float arrowWidth = 5.0f;
+                            const ImVec2 p0 = to;
+                            const ImVec2 p1(to.x - d.x * arrowLen + n.x * arrowWidth, to.y - d.y * arrowLen + n.y * arrowWidth);
+                            const ImVec2 p2(to.x - d.x * arrowLen - n.x * arrowWidth, to.y - d.y * arrowLen - n.y * arrowWidth);
+                            drawList->AddTriangleFilled(p0, p1, p2, color);
+                        };
+
+                        drawList->AddLine(gizmoCenter, gizmoXTip, axisColor(TransformAxis::X), thicknessX);
+                        drawList->AddLine(gizmoCenter, gizmoYTip, axisColor(TransformAxis::Y), thicknessY);
+                        drawList->AddLine(gizmoCenter, gizmoZTip, axisColor(TransformAxis::Z), thicknessZ);
+
+                        drawArrowHead(gizmoCenter, gizmoXTip, axisColor(TransformAxis::X));
+                        drawArrowHead(gizmoCenter, gizmoYTip, axisColor(TransformAxis::Y));
+                        drawArrowHead(gizmoCenter, gizmoZTip, axisColor(TransformAxis::Z));
+
+                        drawList->AddCircleFilled(gizmoXTip, isHighlighted(TransformAxis::X) ? 6.0f : 4.0f, axisColor(TransformAxis::X), 16);
+                        drawList->AddCircleFilled(gizmoYTip, isHighlighted(TransformAxis::Y) ? 6.0f : 4.0f, axisColor(TransformAxis::Y), 16);
+                        drawList->AddCircleFilled(gizmoZTip, isHighlighted(TransformAxis::Z) ? 6.0f : 4.0f, axisColor(TransformAxis::Z), 16);
+                        
+                        if (transformMode == TransformMode::Rotate) {
+                            auto ringColor = [&](TransformAxis axis) {
+                                if (axis == TransformAxis::X) {
+                                    return isHighlighted(axis) ? IM_COL32(235, 70, 70, 255) : IM_COL32(235, 70, 70, 160);
+                                }
+                                if (axis == TransformAxis::Y) {
+                                    return isHighlighted(axis) ? IM_COL32(75, 145, 240, 255) : IM_COL32(75, 145, 240, 160);
+                                }
+                                return isHighlighted(axis) ? IM_COL32(90, 215, 90, 255) : IM_COL32(90, 215, 90, 160);
+                            };
+
+                            auto drawRing = [&](TransformAxis axis) {
+                                const float thickness = isHighlighted(axis) ? 3.5f : 2.0f;
+                                drawList->AddCircle(gizmoCenter, ringRadiusForAxis(axis), ringColor(axis), 64, thickness);
+                            };
+
+                            drawRing(TransformAxis::X);
+                            drawRing(TransformAxis::Y);
+                            drawRing(TransformAxis::Z);
+                        }
                     }
 
                     const ImVec2 axisCenter(imgMax.x - 42.0f, imgMin.y + 42.0f);
@@ -313,12 +689,33 @@ int Application::run() {
                     const ImVec2 zTip(axisCenter.x + zDir.x * zLen, axisCenter.y + zDir.y * zLen);
 
                     drawList->AddLine(axisCenter, xTip, IM_COL32(235, 70, 70, 255), 2.0f);
-                    drawList->AddLine(axisCenter, yTip, IM_COL32(90, 215, 90, 255), 2.0f);
-                    drawList->AddLine(axisCenter, zTip, IM_COL32(75, 145, 240, 255), 2.0f);
+                    drawList->AddLine(axisCenter, yTip, IM_COL32(75, 145, 240, 255), 2.0f);
+                    drawList->AddLine(axisCenter, zTip, IM_COL32(90, 215, 90, 255), 2.0f);
+
+                    auto drawMiniArrow = [&](const ImVec2& from, const ImVec2& to, ImU32 color) {
+                        ImVec2 d(to.x - from.x, to.y - from.y);
+                        const float len = std::sqrt(d.x * d.x + d.y * d.y);
+                        if (len < 0.001f) {
+                            return;
+                        }
+                        d.x /= len;
+                        d.y /= len;
+                        const ImVec2 n(-d.y, d.x);
+                        const float arrowLen = 5.5f;
+                        const float arrowWidth = 3.0f;
+                        const ImVec2 p0 = to;
+                        const ImVec2 p1(to.x - d.x * arrowLen + n.x * arrowWidth, to.y - d.y * arrowLen + n.y * arrowWidth);
+                        const ImVec2 p2(to.x - d.x * arrowLen - n.x * arrowWidth, to.y - d.y * arrowLen - n.y * arrowWidth);
+                        drawList->AddTriangleFilled(p0, p1, p2, color);
+                    };
+
+                    drawMiniArrow(axisCenter, xTip, IM_COL32(235, 70, 70, 255));
+                    drawMiniArrow(axisCenter, yTip, IM_COL32(75, 145, 240, 255));
+                    drawMiniArrow(axisCenter, zTip, IM_COL32(90, 215, 90, 255));
 
                     drawList->AddText(ImVec2(xTip.x + 3.0f, xTip.y - 8.0f), IM_COL32(235, 70, 70, 255), "X");
-                    drawList->AddText(ImVec2(yTip.x + 3.0f, yTip.y - 8.0f), IM_COL32(90, 215, 90, 255), "Y");
-                    drawList->AddText(ImVec2(zTip.x + 3.0f, zTip.y - 8.0f), IM_COL32(75, 145, 240, 255), "Z");
+                    drawList->AddText(ImVec2(yTip.x + 3.0f, yTip.y - 8.0f), IM_COL32(75, 145, 240, 255), "Z");
+                    drawList->AddText(ImVec2(zTip.x + 3.0f, zTip.y - 8.0f), IM_COL32(90, 215, 90, 255), "Y");
 
                     ImGui::EndTabItem();
                 }
@@ -336,8 +733,12 @@ int Application::run() {
 
         ImGui::Separator();
         ImGui::BeginChild("StatusBar", ImVec2(0.0f, statusBarHeight), false, ImGuiWindowFlags_NoScrollbar);
+        const char* modeLabel = (transformMode == TransformMode::Move)
+            ? "Move"
+            : (transformMode == TransformMode::Rotate ? "Rotate" : "Scale");
         ImGui::Text(
-            "Tips: LMB Click=Select | LMB Drag=Box Multi-select | Scroll=Zoom | RMB Drag=Rotate World | Ctrl+P=Pan Mode (%s)",
+            "Tips: LMB Click=Select | LMB Drag=Box Multi-select | Drag Selected=Transform (%s) | W/E/R=Mode | Scroll=Zoom | RMB Drag=Rotate World | Ctrl+P=Pan Mode (%s)",
+            modeLabel,
             panModeEnabled ? "ON" : "OFF");
         ImGui::EndChild();
 

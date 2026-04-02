@@ -166,9 +166,13 @@ void Renderer::render(
 
     const glm::mat4 gridMvp = projection * view * world;
     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(gridMvp));
-    glUniform3f(colorLoc, 0.24f, 0.24f, 0.26f);
     glBindVertexArray(m_gridVao);
-    glDrawArrays(GL_LINES, 0, m_gridVertexCount);
+    glUniform3f(colorLoc, 0.24f, 0.24f, 0.26f);
+    glDrawArrays(GL_LINES, 0, m_gridRegularCount);
+    glUniform3f(colorLoc, 0.53f, 0.11f, 0.11f);
+    glDrawArrays(GL_LINES, m_gridAxisXStart, 2);
+    glUniform3f(colorLoc, 0.11f, 0.43f, 0.11f);
+    glDrawArrays(GL_LINES, m_gridAxisYStart, 2);
 
     glBindVertexArray(m_vao);
 
@@ -197,7 +201,7 @@ void Renderer::render(
         model = glm::rotate(model, rotationRad.x, glm::vec3(1.0f, 0.0f, 0.0f));
         model = glm::rotate(model, rotationRad.y, glm::vec3(0.0f, 1.0f, 0.0f));
         model = glm::rotate(model, rotationRad.z, glm::vec3(0.0f, 0.0f, 1.0f));
-        model = glm::scale(model, glm::vec3(props.scale));
+        model = glm::scale(model, props.scale);
 
         glm::vec3 drawColor = props.baseColor;
         if (selectedObjects[i]) {
@@ -251,14 +255,19 @@ void Renderer::createCubeResources() {
 }
 
 void Renderer::createGridResources() {
-    constexpr int halfGrid = 10;
+    constexpr int halfGrid = 20;
     constexpr float spacing = 1.0f;
     constexpr float y = -0.75f;
 
     std::vector<float> vertices;
-    vertices.reserve((halfGrid * 2 + 1) * 12);
+    vertices.reserve(halfGrid * 2 * 12 + 12);
 
+    // Regular grid lines: skip the center axis lines, drawn separately with colors.
     for (int i = -halfGrid; i <= halfGrid; ++i) {
+        if (i == 0) {
+            continue;
+        }
+
         const float p = static_cast<float>(i) * spacing;
 
         vertices.push_back(static_cast<float>(-halfGrid) * spacing);
@@ -276,7 +285,23 @@ void Renderer::createGridResources() {
         vertices.push_back(static_cast<float>(halfGrid) * spacing);
     }
 
-    m_gridVertexCount = static_cast<int>(vertices.size() / 3);
+    m_gridRegularCount = static_cast<int>(vertices.size() / 3);
+
+    m_gridAxisXStart = m_gridRegularCount;
+    vertices.push_back(static_cast<float>(-halfGrid) * spacing);
+    vertices.push_back(y);
+    vertices.push_back(0.0f);
+    vertices.push_back(static_cast<float>(halfGrid) * spacing);
+    vertices.push_back(y);
+    vertices.push_back(0.0f);
+
+    m_gridAxisYStart = m_gridRegularCount + 2;
+    vertices.push_back(0.0f);
+    vertices.push_back(y);
+    vertices.push_back(static_cast<float>(-halfGrid) * spacing);
+    vertices.push_back(0.0f);
+    vertices.push_back(y);
+    vertices.push_back(static_cast<float>(halfGrid) * spacing);
 
     glGenVertexArrays(1, &m_gridVao);
     glGenBuffers(1, &m_gridVbo);
