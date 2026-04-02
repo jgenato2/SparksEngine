@@ -1,0 +1,58 @@
+# Build directories
+/build/
+/out/
+/bin/
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# VS generated project files
+*.sln
+*.slnx
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.dir/
+
+# Build products
+*.obj
+*.o
+*.pdb
+*.idb
+*.ilk
+*.lib
+*.dll
+*.exp
+*.exe
+*.tlog
+
+# Ninja / Make
+.ninja_deps
+.ninja_log
+build.ninja
+Makefile
+
+# Logs and temp
+*.log
+*.tmp
+*.temp
+
+# IDE/editor
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/c_cpp_properties.json
+!.vscode/extensions.json
+.vscode/*.db
+.vscode/ipch/
+.vscode/.browse.VC.db
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,47 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 26,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default (Ninja if available)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "vs2026",
+      "displayName": "Visual Studio 18 2026",
+      "generator": "Visual Studio 18 2026",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-release",
+      "displayName": "Build Release",
+      "configurePreset": "vs2026",
+      "configuration": "Release"
+    },
+    {
+      "name": "build-debug",
+      "displayName": "Build Debug",
+      "configurePreset": "vs2026",
+      "configuration": "Debug"
+    }
+  ]
+}
