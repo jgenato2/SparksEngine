@@ -37,8 +37,16 @@ unsigned int createProgram() {
         layout (location = 0) in vec3 aPos;
 
         uniform mat4 uMvp;
+        uniform mat4 uModel;
+        out vec3 vLocalPos;
+        out vec3 vWorldPos;
+        out vec3 vWorldNormal;
 
         void main() {
+            vLocalPos = aPos;
+            vWorldPos = vec3(uModel * vec4(aPos, 1.0));
+            mat3 normalMat = mat3(transpose(inverse(uModel)));
+            vWorldNormal = normalize(normalMat * aPos);
             gl_Position = uMvp * vec4(aPos, 1.0);
         }
     )";
@@ -46,11 +54,23 @@ unsigned int createProgram() {
     static constexpr const char* kFragmentShader = R"(
         #version 460 core
         out vec4 FragColor;
+        in vec3 vLocalPos;
+        in vec3 vWorldPos;
+        in vec3 vWorldNormal;
 
         uniform vec3 uColor;
+        uniform float uAlpha;
+        uniform float uGradientStrength;
+        uniform vec3 uLightPos;
 
         void main() {
-            FragColor = vec4(uColor, 1.0);
+            const float t = clamp(vLocalPos.y * 0.5 + 0.5, 0.0, 1.0);
+            const vec3 lightDir = normalize(uLightPos - vWorldPos);
+            const float lambert = max(dot(normalize(vWorldNormal), lightDir), 0.0);
+            const float shade = mix(0.45, 1.25, pow(lambert, 0.85));
+            const vec3 lightGradient = mix(uColor * (0.65 + 0.25 * t), uColor * shade, 0.8);
+            const vec3 finalColor = mix(uColor, lightGradient, uGradientStrength);
+            FragColor = vec4(finalColor, uAlpha);
         }
     )";
 
@@ -162,11 +182,21 @@ void Renderer::render(
     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
 
     const int mvpLoc = glGetUniformLocation(m_shaderProgram, "uMvp");
+    const int modelLoc = glGetUniformLocation(m_shaderProgram, "uModel");
     const int colorLoc = glGetUniformLocation(m_shaderProgram, "uColor");
+    const int alphaLoc = glGetUniformLocation(m_shaderProgram, "uAlpha");
+    const int gradientLoc = glGetUniformLocation(m_shaderProgram, "uGradientStrength");
+    const int lightPosLoc = glGetUniformLocation(m_shaderProgram, "uLightPos");
+
+    const glm::vec3 lightPos(5.5f, 6.5f, 4.0f);
+    glUniform3f(lightPosLoc, lightPos.x, lightPos.y, lightPos.z);
 
     const glm::mat4 gridMvp = projection * view * world;
     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(gridMvp));
+    glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(world));
     glBindVertexArray(m_gridVao);
+    glUniform1f(alphaLoc, 1.0f);
+    glUniform1f(gradientLoc, 0.0f);
     glUniform3f(colorLoc, 0.24f, 0.24f, 0.26f);
     glDrawArrays(GL_LINES, 0, m_gridRegularCount);
     glUniform3f(colorLoc, 0.53f, 0.11f, 0.11f);
@@ -176,10 +206,14 @@ void Renderer::render(
 
     glBindVertexArray(m_vao);
 
-    auto drawCube = [&](const glm::mat4& model, const glm::vec3& color, const bool wireframe) {
-        const glm::mat4 mvp = projection * view * world * model;
+    auto drawCube = [&](const glm::mat4& model, const glm::vec3& color, const bool wireframe, const float alpha, const float gradientStrength) {
+        const glm::mat4 worldModel = world * model;
+        const glm::mat4 mvp = projection * view * worldModel;
         glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
+        glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(worldModel));
         glUniform3f(colorLoc, color.r, color.g, color.b);
+        glUniform1f(alphaLoc, alpha);
+        glUniform1f(gradientLoc, gradientStrength);
 
         if (wireframe) {
             glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
@@ -190,6 +224,44 @@ void Renderer::render(
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         }
     };
+
+    // Planar projected shadows onto the grid plane.
+    constexpr float kShadowPlaneY = -0.749f;
+    const glm::vec4 shadowPlane(0.0f, 1.0f, 0.0f, -kShadowPlaneY);
+    const glm::vec3 lightDir3 = glm::normalize(glm::vec3(-0.65f, 1.0f, -0.45f));
+    const glm::vec4 lightDir(lightDir3, 0.0f);
+
+    const float dot = shadowPlane.x * lightDir.x + shadowPlane.y * lightDir.y + shadowPlane.z * lightDir.z + shadowPlane.w * lightDir.w;
+    glm::mat4 shadowProj(0.0f);
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            const float identity = (row == col) ? dot : 0.0f;
+            shadowProj[col][row] = identity - lightDir[row] * shadowPlane[col];
+        }
+    }
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    for (std::size_t i = 0; i < objects.size(); ++i) {
+        const auto& props = objects[i];
+
+        glm::mat4 model(1.0f);
+        model = glm::translate(model, props.position);
+
+        const glm::vec3 rotationRad = glm::radians(props.rotationEulerDegrees);
+        model = glm::rotate(model, rotationRad.x, glm::vec3(1.0f, 0.0f, 0.0f));
+        model = glm::rotate(model, rotationRad.y, glm::vec3(0.0f, 1.0f, 0.0f));
+        model = glm::rotate(model, rotationRad.z, glm::vec3(0.0f, 0.0f, 1.0f));
+        model = glm::scale(model, props.scale);
+
+        const glm::mat4 shadowModel = shadowProj * model;
+        drawCube(shadowModel, glm::vec3(0.02f, 0.02f, 0.03f), false, 0.38f, 0.0f);
+    }
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 
     for (std::size_t i = 0; i < objects.size(); ++i) {
         const auto& props = objects[i];
@@ -208,7 +280,7 @@ void Renderer::render(
             drawColor = glm::clamp(drawColor + glm::vec3(0.18f), glm::vec3(0.0f), glm::vec3(1.0f));
         }
 
-        drawCube(model, drawColor, props.wireframe);
+        drawCube(model, drawColor, props.wireframe, 1.0f, 1.0f);
     }
 
     glBindVertexArray(0);

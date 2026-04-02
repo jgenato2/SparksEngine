@@ -12,6 +12,7 @@
 #include <GLFW/glfw3.h>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
@@ -51,6 +52,7 @@ int Application::run() {
         X,
         Y,
         Z,
+        View,
     };
 
     std::array<sparks::core::CubeProperties, 2> sceneObjects{};
@@ -70,6 +72,8 @@ int Application::run() {
     TransformAxis activeTransformAxis = TransformAxis::None;
     bool transformDragging = false;
     ImVec2 transformDragStartMouse(0.0f, 0.0f);
+    ImVec2 transformDragPrevMouse(0.0f, 0.0f);
+    float transformRotateAccumDeg = 0.0f;
     glm::vec2 transformDragStartWorldRotation(0.0f, 0.0f);
     glm::vec3 transformDragStartSelectedCenter(0.0f);
     std::array<sparks::core::CubeProperties, 2> transformDragStartObjects{};
@@ -152,7 +156,11 @@ int Application::run() {
         const float contentHeight = (workspaceSize.y > statusBarHeight + 6.0f)
             ? (workspaceSize.y - statusBarHeight - 6.0f)
             : workspaceSize.y;
-        const float leftPaneWidth = workspaceSize.x * 0.72f;
+        static float leftPaneWidth = -1.0f;
+        if (leftPaneWidth < 0.0f) {
+            leftPaneWidth = workspaceSize.x * 0.72f;
+        }
+        leftPaneWidth = std::clamp(leftPaneWidth, 200.0f, workspaceSize.x - 220.0f);
 
         ImGui::BeginChild("ViewportPane", ImVec2(leftPaneWidth, contentHeight), true);
         {
@@ -208,6 +216,7 @@ int Application::run() {
                     glm::mat4 world(1.0f);
                     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
                     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
+                    const glm::vec3 viewRotateAxis = glm::normalize(glm::vec3(glm::inverse(world) * glm::vec4(0.0f, 0.0f, 1.0f, 0.0f)));
 
                     auto computeObjectScreenBounds = [&](const sparks::core::CubeProperties& props, ImVec2& outMin, ImVec2& outMax) {
                         static constexpr std::array<glm::vec3, 8> kLocalCorners = {
@@ -306,6 +315,18 @@ int Application::run() {
                         return dx * dx + dy * dy;
                     };
 
+                    auto screenToWorldAtDepth = [&](const ImVec2& screenPos, const float ndcDepth) {
+                        const float x = ((screenPos.x - imgMin.x) / viewportSize.x) * 2.0f - 1.0f;
+                        const float y = 1.0f - ((screenPos.y - imgMin.y) / viewportSize.y) * 2.0f;
+                        const glm::vec4 clip(x, y, ndcDepth, 1.0f);
+                        const glm::mat4 invMvp = glm::inverse(projection * view * world);
+                        const glm::vec4 worldPos = invMvp * clip;
+                        if (std::abs(worldPos.w) < 0.0001f) {
+                            return glm::vec3(0.0f);
+                        }
+                        return glm::vec3(worldPos) / worldPos.w;
+                    };
+
                     int selectedCount = 0;
                     glm::vec3 selectedCenter(0.0f);
                     glm::vec3 boundMin(std::numeric_limits<float>::max());
@@ -327,6 +348,13 @@ int Application::run() {
                     }
 
                     const ImVec2 gizmoCenter = hasSelection ? projectPointToScreen(selectedCenter) : ImVec2(-10000.0f, -10000.0f);
+                    float selectedCenterNdcZ = 0.0f;
+                    if (hasSelection) {
+                        const glm::vec4 centerClip = projection * view * world * glm::vec4(selectedCenter, 1.0f);
+                        if (std::abs(centerClip.w) > 0.0001f) {
+                            selectedCenterNdcZ = centerClip.z / centerClip.w;
+                        }
+                    }
                     const float gizmoLength = 64.0f;
                     const ImVec2 xDir2D = axisDirection2D(TransformAxis::X);
                     const ImVec2 yDir2D = axisDirection2D(TransformAxis::Y);
@@ -341,14 +369,17 @@ int Application::run() {
                         if (axis == TransformAxis::Y) {
                             return 64.0f;
                         }
-                        return 74.0f;
+                        if (axis == TransformAxis::Z) {
+                            return 74.0f;
+                        }
+                        return 88.0f;
                     };
 
                     TransformAxis hoveredGizmoAxis = TransformAxis::None;
                     if (sceneImageHovered && hasSelection) {
                         float bestDistSq = 10.0f * 10.0f;
                         if (transformMode == TransformMode::Rotate) {
-                            bestDistSq = 10.0f * 10.0f;
+                            bestDistSq = 12.0f;
                             const float dx = io.MousePos.x - gizmoCenter.x;
                             const float dy = io.MousePos.y - gizmoCenter.y;
                             const float mouseRadius = std::sqrt(dx * dx + dy * dy);
@@ -369,6 +400,12 @@ int Application::run() {
                             if (ringDistZ < bestDistSq) {
                                 bestDistSq = ringDistZ;
                                 hoveredGizmoAxis = TransformAxis::Z;
+                            }
+
+                            const float ringDistView = std::abs(mouseRadius - ringRadiusForAxis(TransformAxis::View));
+                            if (ringDistView < bestDistSq) {
+                                bestDistSq = ringDistView;
+                                hoveredGizmoAxis = TransformAxis::View;
                             }
                         } else {
                             const float dx = io.MousePos.x - gizmoCenter.x;
@@ -417,11 +454,25 @@ int Application::run() {
                     }
                     ImGui::PopStyleVar();
 
+                    if (sceneImageHovered && hasSelection && !panModeEnabled && !clickInModeButtons && ImGui::IsKeyPressed(ImGuiKey_G, false)) {
+                        transformMode = TransformMode::Move;
+                        transformDragging = true;
+                        activeTransformAxis = TransformAxis::View;
+                        transformDragStartMouse = io.MousePos;
+                        transformDragPrevMouse = io.MousePos;
+                        transformRotateAccumDeg = 0.0f;
+                        transformDragStartWorldRotation = viewControls.worldRotationDegrees;
+                        transformDragStartSelectedCenter = selectedCenter;
+                        transformDragStartObjects = sceneObjects;
+                    }
+
                         if (sceneImageHovered && !panModeEnabled && !clickInModeButtons && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                             if (hasSelection && hoveredGizmoAxis != TransformAxis::None) {
                                 transformDragging = true;
                                 activeTransformAxis = hoveredGizmoAxis;
                                 transformDragStartMouse = io.MousePos;
+                                transformDragPrevMouse = io.MousePos;
+                                transformRotateAccumDeg = 0.0f;
                                 transformDragStartWorldRotation = viewControls.worldRotationDegrees;
                                 transformDragStartSelectedCenter = selectedCenter;
                                 transformDragStartObjects = sceneObjects;
@@ -445,7 +496,7 @@ int Application::run() {
 
                         float rotateAmountDeg = 0.0f;
                         if (transformMode == TransformMode::Rotate) {
-                            const ImVec2 startVec(transformDragStartMouse.x - gizmoCenter.x, transformDragStartMouse.y - gizmoCenter.y);
+                            const ImVec2 startVec(transformDragPrevMouse.x - gizmoCenter.x, transformDragPrevMouse.y - gizmoCenter.y);
                             const ImVec2 curVec(io.MousePos.x - gizmoCenter.x, io.MousePos.y - gizmoCenter.y);
                             const float startLen = std::sqrt(startVec.x * startVec.x + startVec.y * startVec.y);
                             const float curLen = std::sqrt(curVec.x * curVec.x + curVec.y * curVec.y);
@@ -455,8 +506,10 @@ int Application::run() {
                                 const float dot = std::clamp(s.x * c.x + s.y * c.y, -1.0f, 1.0f);
                                 const float cross = s.x * c.y - s.y * c.x;
                                 const float angleRad = std::atan2(cross, dot);
-                                rotateAmountDeg = -glm::degrees(angleRad) * 0.75f;
+                                transformRotateAccumDeg += -glm::degrees(angleRad) * 0.75f;
                             }
+                            transformDragPrevMouse = io.MousePos;
+                            rotateAmountDeg = transformRotateAccumDeg;
                         }
 
                         for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
@@ -468,6 +521,14 @@ int Application::run() {
                             auto& obj = sceneObjects[static_cast<std::size_t>(i)];
 
                             if (transformMode == TransformMode::Move) {
+                                if (activeTransformAxis == TransformAxis::View) {
+                                    const glm::vec3 startWorld = screenToWorldAtDepth(transformDragStartMouse, selectedCenterNdcZ);
+                                    const glm::vec3 currentWorld = screenToWorldAtDepth(io.MousePos, selectedCenterNdcZ);
+                                    const glm::vec3 worldDelta = currentWorld - startWorld;
+                                    obj.position = startObj.position + worldDelta;
+                                    continue;
+                                }
+
                                 const float moveFactor = 0.004f * viewControls.zoomDistance;
                                 if (activeTransformAxis == TransformAxis::X) {
                                     obj.position.x = startObj.position.x + dragAmount * moveFactor;
@@ -484,17 +545,23 @@ int Application::run() {
                                     rotationAxis = glm::vec3(0.0f, 1.0f, 0.0f);
                                 } else if (activeTransformAxis == TransformAxis::Z) {
                                     rotationAxis = glm::vec3(0.0f, 0.0f, 1.0f);
+                                } else if (activeTransformAxis == TransformAxis::View) {
+                                    rotationAxis = viewRotateAxis;
                                 }
 
                                 const float angleRadians = glm::radians(rotateAmountDeg);
                                 const glm::quat rotation = glm::angleAxis(angleRadians, rotationAxis);
 
+                                // Rotate the selection boundary box and move each object with it.
                                 const glm::vec3 relativePos = startObj.position - transformDragStartSelectedCenter;
                                 const glm::vec3 rotatedRelPos = rotation * relativePos;
                                 obj.position = transformDragStartSelectedCenter + rotatedRelPos;
+
+                                // Keep each object's local orientation fixed while rotating the boundary box.
+                                obj.rotationEulerDegrees = startObj.rotationEulerDegrees;
                             } else {
                                 const float scaleFactor = 1.0f + dragAmount * 0.004f;
-                                // Scale along active axis, pivoting each object relative to the boundary center.
+                                // Blender-like: scale both object size and pivot-relative layout.
                                 const glm::vec3 startRel = startObj.position - transformDragStartSelectedCenter;
                                 glm::vec3 scaledRel = startRel;
                                 glm::vec3 nextScale = startObj.scale;
@@ -655,6 +722,13 @@ int Application::run() {
                             drawRing(TransformAxis::X);
                             drawRing(TransformAxis::Y);
                             drawRing(TransformAxis::Z);
+
+                            drawList->AddCircle(
+                                gizmoCenter,
+                                ringRadiusForAxis(TransformAxis::View),
+                                isHighlighted(TransformAxis::View) ? IM_COL32(245, 245, 245, 230) : IM_COL32(245, 245, 245, 130),
+                                96,
+                                isHighlighted(TransformAxis::View) ? 3.5f : 2.0f);
                         }
                     }
 
@@ -727,8 +801,57 @@ int Application::run() {
 
         ImGui::SameLine();
 
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.20f, 0.22f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.36f, 0.47f, 0.70f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.36f, 0.47f, 0.70f, 1.0f));
+        ImGui::Button("##PanelSplitter", ImVec2(4.0f, contentHeight));
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        }
+        if (ImGui::IsItemActive()) {
+            leftPaneWidth = std::clamp(leftPaneWidth + io.MouseDelta.x, 200.0f, workspaceSize.x - 220.0f);
+        }
+
+        ImGui::SameLine();
+
+        ImGui::BeginChild("RightPane", ImVec2(0.0f, contentHeight), false, ImGuiWindowFlags_NoScrollbar);
+        static float hierarchyHeight = 170.0f;
+        hierarchyHeight = std::clamp(hierarchyHeight, 110.0f, contentHeight - 140.0f);
+
+        ImGui::BeginChild("HierarchyPane", ImVec2(0.0f, hierarchyHeight), true);
+        ImGui::TextUnformatted("Hierarchy");
+        ImGui::Separator();
+        for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
+            char label[48];
+            std::snprintf(label, sizeof(label), "Cube %d", i + 1);
+            const bool isSelected = selectedObjects[static_cast<std::size_t>(i)];
+            if (ImGui::Selectable(label, isSelected)) {
+                if (!io.KeyCtrl) {
+                    std::fill(selectedObjects.begin(), selectedObjects.end(), false);
+                    selectedObjects[static_cast<std::size_t>(i)] = true;
+                } else {
+                    selectedObjects[static_cast<std::size_t>(i)] = !selectedObjects[static_cast<std::size_t>(i)];
+                }
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.20f, 0.22f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.36f, 0.47f, 0.70f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.36f, 0.47f, 0.70f, 1.0f));
+        ImGui::Button("##HierarchySplitter", ImVec2(-1.0f, 4.0f));
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        }
+        if (ImGui::IsItemActive()) {
+            hierarchyHeight = std::clamp(hierarchyHeight + io.MouseDelta.y, 110.0f, contentHeight - 140.0f);
+        }
+
         ImGui::BeginChild("PropertiesPane", ImVec2(0.0f, contentHeight), true);
         propertyPanel.draw(sceneObjects, selectedObjects);
+        ImGui::EndChild();
         ImGui::EndChild();
 
         ImGui::Separator();
