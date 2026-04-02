@@ -1,6 +1,5 @@
 #include "sparks/render/Renderer.hpp"
 
-#include <array>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -131,14 +130,25 @@ unsigned int createTexturedProgram() {
 
         uniform sampler2D uTex;
         uniform vec3 uLightPos;
+        uniform float uOpacity;
+        uniform int uShadowPass;
 
         void main() {
+            if (uShadowPass == 1) {
+                FragColor = vec4(0.02, 0.02, 0.03, 0.38);
+                return;
+            }
+
             vec4 base = texture(uTex, vUv);
             vec3 n = normalize(vWorldNormal);
             vec3 l = normalize(uLightPos - vWorldPos);
             float ndl = max(dot(n, l), 0.0);
             float lit = mix(0.35, 1.25, pow(ndl, 0.9));
-            FragColor = vec4(base.rgb * lit, base.a);
+            float alpha = base.a * uOpacity;
+            if (alpha <= 0.01) {
+                discard;
+            }
+            FragColor = vec4(base.rgb * lit, alpha);
         }
     )";
 
@@ -177,18 +187,6 @@ Renderer::~Renderer() {
         glDeleteProgram(m_shaderProgram);
     }
 
-    if (m_ebo != 0) {
-        glDeleteBuffers(1, &m_ebo);
-    }
-
-    if (m_vbo != 0) {
-        glDeleteBuffers(1, &m_vbo);
-    }
-
-    if (m_vao != 0) {
-        glDeleteVertexArrays(1, &m_vao);
-    }
-
     if (m_gridVbo != 0) {
         glDeleteBuffers(1, &m_gridVbo);
     }
@@ -221,7 +219,6 @@ Renderer::~Renderer() {
 void Renderer::initialize() {
     m_shaderProgram = createProgram();
     m_texturedProgram = createTexturedProgram();
-    createCubeResources();
     createGridResources();
     createFramebuffer();
 }
@@ -283,9 +280,15 @@ void Renderer::setImportedModel(const ImportedModelData& model) {
     glBindVertexArray(0);
 
     m_importIndexCount = static_cast<int>(model.indices.size());
-    m_importPosition = model.position;
-    m_importRotationEuler = model.rotationEulerDegrees;
-    m_importScale = model.scale;
+    m_importOpacity = model.opacity;
+    m_importAlphaBlend = model.alphaBlend;
+    setImportedModelTransform(model.position, model.rotationEulerDegrees, model.scale);
+}
+
+void Renderer::setImportedModelTransform(const glm::vec3& position, const glm::vec3& rotationEulerDegrees, const glm::vec3& scale) {
+    m_importPosition = position;
+    m_importRotationEuler = rotationEulerDegrees;
+    m_importScale = scale;
 }
 
 void Renderer::setViewportSize(const int width, const int height) {
@@ -302,19 +305,12 @@ void Renderer::setViewportSize(const int width, const int height) {
     rebuildFramebufferIfNeeded(width, height);
 }
 
-void Renderer::render(
-    std::span<const sparks::core::CubeProperties> objects,
-    std::span<const bool> selectedObjects,
-    const ViewControls& viewControls) {
-    if (objects.empty() || selectedObjects.size() != objects.size()) {
-        return;
-    }
-
+void Renderer::render(const ViewControls& viewControls) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glViewport(0, 0, m_viewportWidth, m_viewportHeight);
     glEnable(GL_DEPTH_TEST);
 
-    glClearColor(objects[0].backgroundColor.r, objects[0].backgroundColor.g, objects[0].backgroundColor.b, 1.0f);
+    glClearColor(0.10f, 0.11f, 0.12f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glUseProgram(m_shaderProgram);
@@ -355,27 +351,6 @@ void Renderer::render(
     glUniform3f(colorLoc, 0.11f, 0.43f, 0.11f);
     glDrawArrays(GL_LINES, m_gridAxisYStart, 2);
 
-    glBindVertexArray(m_vao);
-
-    auto drawCube = [&](const glm::mat4& model, const glm::vec3& color, const bool wireframe, const float alpha, const float gradientStrength) {
-        const glm::mat4 worldModel = world * model;
-        const glm::mat4 mvp = projection * view * worldModel;
-        glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
-        glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(worldModel));
-        glUniform3f(colorLoc, color.r, color.g, color.b);
-        glUniform1f(alphaLoc, alpha);
-        glUniform1f(gradientLoc, gradientStrength);
-
-        if (wireframe) {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        }
-
-        glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, nullptr);
-        if (wireframe) {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        }
-    };
-
     // Planar projected shadows onto the grid plane.
     constexpr float kShadowPlaneY = -0.749f;
     const glm::vec4 shadowPlane(0.0f, 1.0f, 0.0f, -kShadowPlaneY);
@@ -391,49 +366,6 @@ void Renderer::render(
         }
     }
 
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
-
-    for (std::size_t i = 0; i < objects.size(); ++i) {
-        const auto& props = objects[i];
-
-        glm::mat4 model(1.0f);
-        model = glm::translate(model, props.position);
-
-        const glm::vec3 rotationRad = glm::radians(props.rotationEulerDegrees);
-        model = glm::rotate(model, rotationRad.x, glm::vec3(1.0f, 0.0f, 0.0f));
-        model = glm::rotate(model, rotationRad.y, glm::vec3(0.0f, 1.0f, 0.0f));
-        model = glm::rotate(model, rotationRad.z, glm::vec3(0.0f, 0.0f, 1.0f));
-        model = glm::scale(model, props.scale);
-
-        const glm::mat4 shadowModel = shadowProj * model;
-        drawCube(shadowModel, glm::vec3(0.02f, 0.02f, 0.03f), false, 0.38f, 0.0f);
-    }
-
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
-
-    for (std::size_t i = 0; i < objects.size(); ++i) {
-        const auto& props = objects[i];
-
-        glm::mat4 model(1.0f);
-        model = glm::translate(model, props.position);
-
-        const glm::vec3 rotationRad = glm::radians(props.rotationEulerDegrees);
-        model = glm::rotate(model, rotationRad.x, glm::vec3(1.0f, 0.0f, 0.0f));
-        model = glm::rotate(model, rotationRad.y, glm::vec3(0.0f, 1.0f, 0.0f));
-        model = glm::rotate(model, rotationRad.z, glm::vec3(0.0f, 0.0f, 1.0f));
-        model = glm::scale(model, props.scale);
-
-        glm::vec3 drawColor = props.baseColor;
-        if (selectedObjects[i]) {
-            drawColor = glm::clamp(drawColor + glm::vec3(0.18f), glm::vec3(0.0f), glm::vec3(1.0f));
-        }
-
-        drawCube(model, drawColor, props.wireframe, 1.0f, 1.0f);
-    }
-
     if (m_importVao != 0 && m_importTexture != 0 && m_importIndexCount > 0) {
         glUseProgram(m_texturedProgram);
 
@@ -441,6 +373,8 @@ void Renderer::render(
         const int modelLocT = glGetUniformLocation(m_texturedProgram, "uModel");
         const int lightPosLocT = glGetUniformLocation(m_texturedProgram, "uLightPos");
         const int texLocT = glGetUniformLocation(m_texturedProgram, "uTex");
+        const int opacityLocT = glGetUniformLocation(m_texturedProgram, "uOpacity");
+        const int shadowPassLocT = glGetUniformLocation(m_texturedProgram, "uShadowPass");
 
         glm::mat4 model(1.0f);
         model = glm::translate(model, m_importPosition);
@@ -453,60 +387,53 @@ void Renderer::render(
         const glm::mat4 worldModel = world * model;
         const glm::mat4 mvp = projection * view * worldModel;
 
+        // Draw projected FBX shadow onto the grid first.
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+
+        const glm::mat4 shadowWorldModel = world * (shadowProj * model);
+        const glm::mat4 shadowMvp = projection * view * shadowWorldModel;
+        glUniformMatrix4fv(mvpLocT, 1, GL_FALSE, glm::value_ptr(shadowMvp));
+        glUniformMatrix4fv(modelLocT, 1, GL_FALSE, glm::value_ptr(shadowWorldModel));
+        glUniform3f(lightPosLocT, 5.5f, 6.5f, 4.0f);
+        glUniform1i(texLocT, 0);
+        glUniform1f(opacityLocT, 0.0f);
+        glUniform1i(shadowPassLocT, 1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindVertexArray(m_importVao);
+        glDrawElements(GL_TRIANGLES, m_importIndexCount, GL_UNSIGNED_INT, nullptr);
+
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+
         glUniformMatrix4fv(mvpLocT, 1, GL_FALSE, glm::value_ptr(mvp));
         glUniformMatrix4fv(modelLocT, 1, GL_FALSE, glm::value_ptr(worldModel));
         glUniform3f(lightPosLocT, 5.5f, 6.5f, 4.0f);
         glUniform1i(texLocT, 0);
+        glUniform1f(opacityLocT, m_importOpacity);
+        glUniform1i(shadowPassLocT, 0);
+
+        if (m_importAlphaBlend) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        }
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, m_importTexture);
         glBindVertexArray(m_importVao);
         glDrawElements(GL_TRIANGLES, m_importIndexCount, GL_UNSIGNED_INT, nullptr);
 
-        glUseProgram(m_shaderProgram);
+        if (m_importAlphaBlend) {
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
+
     }
 
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void Renderer::createCubeResources() {
-    static constexpr std::array<float, 24> vertices = {
-        -0.5f, -0.5f, -0.5f,
-         0.5f, -0.5f, -0.5f,
-         0.5f,  0.5f, -0.5f,
-        -0.5f,  0.5f, -0.5f,
-        -0.5f, -0.5f,  0.5f,
-         0.5f, -0.5f,  0.5f,
-         0.5f,  0.5f,  0.5f,
-        -0.5f,  0.5f,  0.5f,
-    };
-
-    static constexpr std::array<unsigned int, 36> indices = {
-        0, 1, 2, 2, 3, 0,
-        4, 5, 6, 6, 7, 4,
-        4, 5, 1, 1, 0, 4,
-        7, 6, 2, 2, 3, 7,
-        4, 0, 3, 3, 7, 4,
-        5, 1, 2, 2, 6, 5,
-    };
-
-    glGenVertexArrays(1, &m_vao);
-    glGenBuffers(1, &m_vbo);
-    glGenBuffers(1, &m_ebo);
-
-    glBindVertexArray(m_vao);
-
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices.data(), GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * static_cast<int>(sizeof(float)), nullptr);
-    glEnableVertexAttribArray(0);
-
-    glBindVertexArray(0);
 }
 
 void Renderer::createGridResources() {

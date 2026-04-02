@@ -16,12 +16,14 @@
 #include <GLFW/glfw3.h>
 #include <assimp/config.h>
 #include <assimp/Importer.hpp>
+#include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtx/quaternion.hpp>
+#include <glm/gtx/euler_angles.hpp>
 #include <imgui.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -29,9 +31,7 @@
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 
-#include "sparks/core/CubeProperties.hpp"
 #include "sparks/render/Renderer.hpp"
-#include "sparks/ui/PropertyPanel.hpp"
 
 namespace {
 
@@ -39,14 +39,76 @@ constexpr float kMinCameraZoom = 1.5f;
 constexpr float kMaxCameraZoom = 250.0f;
 constexpr float kCameraFarPlane = 1000.0f;
 
+struct RigBone {
+    std::string name;
+    int parentIndex{-1};
+    glm::vec3 localPosition{0.0f, 0.0f, 0.0f};
+    glm::vec3 localRotationDegrees{0.0f, 0.0f, 0.0f};
+    float length{0.1f};
+};
+
+std::vector<RigBone> createDefaultTPoseRig() {
+    return {
+        {"Pelvis", -1, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.12f},
+        {"Spine", 0, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.18f},
+        {"Chest", 1, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.16f},
+        {"Neck", 2, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.08f},
+        {"Head", 3, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.12f},
+
+        {"Clavicle_L", 2, glm::vec3(-0.10f, 0.02f, 0.0f), glm::vec3(0.0f, 0.0f, 90.0f), 0.08f},
+        {"UpperArm_L", 5, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.19f},
+        {"LowerArm_L", 6, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.18f},
+        {"Hand_L", 7, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.08f},
+
+        {"Clavicle_R", 2, glm::vec3(0.10f, 0.02f, 0.0f), glm::vec3(0.0f, 0.0f, -90.0f), 0.08f},
+        {"UpperArm_R", 9, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.19f},
+        {"LowerArm_R", 10, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.18f},
+        {"Hand_R", 11, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.08f},
+
+        {"UpperLeg_L", 0, glm::vec3(-0.07f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 180.0f), 0.24f},
+        {"LowerLeg_L", 13, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.22f},
+        {"Foot_L", 14, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-90.0f, 0.0f, 0.0f), 0.12f},
+
+        {"UpperLeg_R", 0, glm::vec3(0.07f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 180.0f), 0.24f},
+        {"LowerLeg_R", 16, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.22f},
+        {"Foot_R", 17, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-90.0f, 0.0f, 0.0f), 0.12f},
+    };
+}
+
 std::string formatVec3(const glm::vec3& value) {
     char buffer[96];
     std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", value.x, value.y, value.z);
     return std::string(buffer);
 }
 
+bool endsWith(const std::string& value, const char* suffix) {
+    const std::size_t valueLen = value.size();
+    const std::size_t suffixLen = std::char_traits<char>::length(suffix);
+    return valueLen >= suffixLen && value.compare(valueLen - suffixLen, suffixLen, suffix) == 0;
+}
+
+glm::vec3 importedModelWorldDimensions(const sparks::render::ImportedModelData& model) {
+    return glm::abs(model.dimensions * model.scale);
+}
+
+glm::quat composeRotationXYZDegrees(const glm::vec3& eulerDegrees) {
+    const glm::vec3 r = glm::radians(eulerDegrees);
+    const glm::quat qx = glm::angleAxis(r.x, glm::vec3(1.0f, 0.0f, 0.0f));
+    const glm::quat qy = glm::angleAxis(r.y, glm::vec3(0.0f, 1.0f, 0.0f));
+    const glm::quat qz = glm::angleAxis(r.z, glm::vec3(0.0f, 0.0f, 1.0f));
+    return glm::normalize(qx * qy * qz);
+}
+
+glm::vec3 eulerDegreesFromQuatXYZ(const glm::quat& q) {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    glm::extractEulerAngleXYZ(glm::toMat4(glm::normalize(q)), x, y, z);
+    return glm::degrees(glm::vec3(x, y, z));
+}
+
 float importedModelFocusZoom(const sparks::render::ImportedModelData& model) {
-    const glm::vec3 extent = glm::max(glm::abs(model.dimensions), glm::vec3(1.0f));
+    const glm::vec3 extent = glm::max(importedModelWorldDimensions(model), glm::vec3(1.0f));
     const float radius = glm::compMax(extent) * 0.5f;
     const float depth = std::abs(model.position.z) + radius;
     return std::clamp(depth * 2.5f, kMinCameraZoom, kMaxCameraZoom);
@@ -190,8 +252,8 @@ std::optional<sparks::render::ImportedModelData> loadFbxModel(const std::string&
 
     model.position = glm::vec3(position.x, position.y, position.z) * unitScale;
     model.scale = glm::vec3(scaling.x, scaling.y, scaling.z) * unitScale;
-    model.rotationEulerDegrees = glm::degrees(glm::eulerAngles(glm::quat(rotation.w, rotation.x, rotation.y, rotation.z)));
-    model.dimensions = (boundsMax - boundsMin) * glm::abs(model.scale);
+    model.rotationEulerDegrees = eulerDegreesFromQuatXYZ(glm::quat(rotation.w, rotation.x, rotation.y, rotation.z));
+    model.dimensions = boundsMax - boundsMin;
 
     for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
         const aiFace& face = mesh->mFaces[f];
@@ -206,9 +268,21 @@ std::optional<sparks::render::ImportedModelData> loadFbxModel(const std::string&
     model.textureWidth = 1;
     model.textureHeight = 1;
     model.textureRgba = {255, 255, 255, 255};
+    model.opacity = 1.0f;
+    model.alphaBlend = false;
 
     if (scene->HasMaterials() && mesh->mMaterialIndex < scene->mNumMaterials) {
         const aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
+        float materialOpacity = 1.0f;
+        if (material->Get(AI_MATKEY_OPACITY, materialOpacity) == AI_SUCCESS) {
+            model.opacity = std::clamp(materialOpacity, 0.0f, 1.0f);
+        }
+
+        aiBlendMode blendMode = aiBlendMode_Default;
+        if (material->Get(AI_MATKEY_BLEND_FUNC, blendMode) == AI_SUCCESS && blendMode != aiBlendMode_Default) {
+            model.alphaBlend = true;
+        }
+
         aiString texPath;
         if (material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS) {
             const std::string texRef = texPath.C_Str();
@@ -260,6 +334,17 @@ std::optional<sparks::render::ImportedModelData> loadFbxModel(const std::string&
 
             stbi_set_flip_vertically_on_load(false);
         }
+
+        for (std::size_t index = 3; index < model.textureRgba.size(); index += 4) {
+            if (model.textureRgba[index] < 250) {
+                model.alphaBlend = true;
+                break;
+            }
+        }
+
+        if (model.opacity < 0.999f) {
+            model.alphaBlend = true;
+        }
     }
 
     return model;
@@ -300,17 +385,7 @@ int Application::run() {
         View,
     };
 
-    std::array<sparks::core::CubeProperties, 2> sceneObjects{};
-    sceneObjects[0].position = glm::vec3(-0.9f, 0.0f, 0.0f);
-    sceneObjects[1].position = glm::vec3(0.9f, 0.0f, -0.8f);
-    sceneObjects[1].baseColor = glm::vec3(0.93f, 0.55f, 0.24f);
-    sceneObjects[1].rotationEulerDegrees = glm::vec3(12.0f, -24.0f, 0.0f);
-    sceneObjects[1].scale = glm::vec3(0.85f, 0.85f, 0.85f);
-
-    std::array<bool, 2> selectedObjects{false, false};
-
     sparks::render::Renderer renderer;
-    sparks::ui::PropertyPanel propertyPanel;
     sparks::render::ViewControls viewControls;
     bool panModeEnabled = false;
     TransformMode transformMode = TransformMode::Move;
@@ -321,11 +396,15 @@ int Application::run() {
     float transformRotateAccumDeg = 0.0f;
     glm::vec2 transformDragStartWorldRotation(0.0f, 0.0f);
     glm::vec3 transformDragStartSelectedCenter(0.0f);
-    std::array<sparks::core::CubeProperties, 2> transformDragStartObjects{};
     bool selectionDragging = false;
     ImVec2 selectionStart(0.0f, 0.0f);
     ImVec2 selectionEnd(0.0f, 0.0f);
     std::string importStatus;
+    std::optional<sparks::render::ImportedModelData> importedModel;
+    std::optional<sparks::render::ImportedModelData> transformDragStartImportedModel;
+    bool importedModelSelected = false;
+    std::vector<RigBone> rigBones = createDefaultTPoseRig();
+    int selectedRigBone = 0;
 
     renderer.initialize();
 
@@ -384,15 +463,17 @@ int Application::run() {
                             std::string error;
                             const auto imported = loadFbxModel(selectedPath, error);
                             if (imported.has_value()) {
-                                renderer.setImportedModel(*imported);
-                                viewControls.panOffset = glm::vec2(imported->position.x, imported->position.y);
-                                viewControls.zoomDistance = importedModelFocusZoom(*imported);
+                                importedModel = *imported;
+                                importedModelSelected = true;
+                                renderer.setImportedModel(*importedModel);
+                                viewControls.panOffset = glm::vec2(importedModel->position.x, importedModel->position.y);
+                                viewControls.zoomDistance = importedModelFocusZoom(*importedModel);
                                 importStatus = std::string("Imported: ")
                                     + std::filesystem::path(selectedPath).filename().string()
-                                    + " | Pos " + formatVec3(imported->position)
-                                    + " | Rot " + formatVec3(imported->rotationEulerDegrees)
-                                    + " | Scale " + formatVec3(imported->scale)
-                                    + " | Dim " + formatVec3(imported->dimensions);
+                                    + " | Pos " + formatVec3(importedModel->position)
+                                    + " | Rot " + formatVec3(importedModel->rotationEulerDegrees)
+                                    + " | Scale " + formatVec3(importedModel->scale)
+                                    + " | Dim " + formatVec3(importedModelWorldDimensions(*importedModel));
                             } else {
                                 importStatus = std::string("FBX import failed: ") + error;
                             }
@@ -472,7 +553,7 @@ int Application::run() {
                     const int viewportHeight = static_cast<int>(viewportSize.y > 1.0f ? viewportSize.y : 1.0f);
 
                     renderer.setViewportSize(viewportWidth, viewportHeight);
-                    renderer.render(sceneObjects, selectedObjects, viewControls);
+                    renderer.render(viewControls);
 
                     ImGui::Image(
                         static_cast<ImTextureID>(static_cast<intptr_t>(renderer.viewportTexture())),
@@ -499,25 +580,29 @@ int Application::run() {
                     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
                     const glm::vec3 viewRotateAxis = glm::normalize(glm::vec3(glm::inverse(world) * glm::vec4(0.0f, 0.0f, 1.0f, 0.0f)));
 
-                    auto computeObjectScreenBounds = [&](const sparks::core::CubeProperties& props, ImVec2& outMin, ImVec2& outMax) {
+                    auto computeImportedScreenBounds = [&](const sparks::render::ImportedModelData& modelData, ImVec2& outMin, ImVec2& outMax) {
+                        const glm::vec3 halfExtent = importedModelWorldDimensions(modelData) * 0.5f;
+                        if (halfExtent.x <= 0.0f || halfExtent.y <= 0.0f || halfExtent.z <= 0.0f) {
+                            return false;
+                        }
+
                         static constexpr std::array<glm::vec3, 8> kLocalCorners = {
-                            glm::vec3(-0.5f, -0.5f, -0.5f),
-                            glm::vec3( 0.5f, -0.5f, -0.5f),
-                            glm::vec3( 0.5f,  0.5f, -0.5f),
-                            glm::vec3(-0.5f,  0.5f, -0.5f),
-                            glm::vec3(-0.5f, -0.5f,  0.5f),
-                            glm::vec3( 0.5f, -0.5f,  0.5f),
-                            glm::vec3( 0.5f,  0.5f,  0.5f),
-                            glm::vec3(-0.5f,  0.5f,  0.5f),
+                            glm::vec3(-1.0f, -1.0f, -1.0f),
+                            glm::vec3( 1.0f, -1.0f, -1.0f),
+                            glm::vec3( 1.0f,  1.0f, -1.0f),
+                            glm::vec3(-1.0f,  1.0f, -1.0f),
+                            glm::vec3(-1.0f, -1.0f,  1.0f),
+                            glm::vec3( 1.0f, -1.0f,  1.0f),
+                            glm::vec3( 1.0f,  1.0f,  1.0f),
+                            glm::vec3(-1.0f,  1.0f,  1.0f),
                         };
 
                         glm::mat4 model(1.0f);
-                        model = glm::translate(model, props.position);
-                        const glm::vec3 rot = glm::radians(props.rotationEulerDegrees);
+                        model = glm::translate(model, modelData.position);
+                        const glm::vec3 rot = glm::radians(modelData.rotationEulerDegrees);
                         model = glm::rotate(model, rot.x, glm::vec3(1.0f, 0.0f, 0.0f));
                         model = glm::rotate(model, rot.y, glm::vec3(0.0f, 1.0f, 0.0f));
                         model = glm::rotate(model, rot.z, glm::vec3(0.0f, 0.0f, 1.0f));
-                        model = glm::scale(model, glm::vec3(props.scale));
 
                         const glm::mat4 mvp = projection * view * world * model;
                         float minX = std::numeric_limits<float>::max();
@@ -527,7 +612,8 @@ int Application::run() {
                         bool hasPoint = false;
 
                         for (const glm::vec3& corner : kLocalCorners) {
-                            const glm::vec4 clip = mvp * glm::vec4(corner, 1.0f);
+                            const glm::vec3 localCorner = corner * halfExtent;
+                            const glm::vec4 clip = mvp * glm::vec4(localCorner, 1.0f);
                             if (clip.w <= 0.0f) {
                                 continue;
                             }
@@ -612,20 +698,17 @@ int Application::run() {
                     glm::vec3 selectedCenter(0.0f);
                     glm::vec3 boundMin(std::numeric_limits<float>::max());
                     glm::vec3 boundMax(std::numeric_limits<float>::lowest());
-                    for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
-                        if (selectedObjects[static_cast<std::size_t>(i)]) {
-                            const auto& obj = sceneObjects[static_cast<std::size_t>(i)];
-                            selectedCenter += obj.position;
-                            const glm::vec3 extent = obj.scale; // Cube half-extent per axis
-                            boundMin = glm::min(boundMin, obj.position - extent);
-                            boundMax = glm::max(boundMax, obj.position + extent);
-                            ++selectedCount;
-                        }
+                    if (importedModelSelected && importedModel.has_value()) {
+                        selectedCenter += importedModel->position;
+                        const glm::vec3 halfExtent = importedModelWorldDimensions(*importedModel) * 0.5f;
+                        boundMin = glm::min(boundMin, importedModel->position - halfExtent);
+                        boundMax = glm::max(boundMax, importedModel->position + halfExtent);
+                        ++selectedCount;
                     }
                     const bool hasSelection = selectedCount > 0;
                     if (hasSelection) {
                         selectedCenter /= static_cast<float>(selectedCount);
-                        selectedCenter = (boundMin + boundMax) * 0.5f; // Use actual bounding box center
+                        selectedCenter = (boundMin + boundMax) * 0.5f;
                     }
 
                     const ImVec2 gizmoCenter = hasSelection ? projectPointToScreen(selectedCenter) : ImVec2(-10000.0f, -10000.0f);
@@ -648,10 +731,10 @@ int Application::run() {
                             return 54.0f;
                         }
                         if (axis == TransformAxis::Y) {
-                            return 64.0f;
+                            return 74.0f;
                         }
                         if (axis == TransformAxis::Z) {
-                            return 74.0f;
+                            return 64.0f;
                         }
                         return 88.0f;
                     };
@@ -744,7 +827,7 @@ int Application::run() {
                         transformRotateAccumDeg = 0.0f;
                         transformDragStartWorldRotation = viewControls.worldRotationDegrees;
                         transformDragStartSelectedCenter = selectedCenter;
-                        transformDragStartObjects = sceneObjects;
+                        transformDragStartImportedModel = importedModel;
                     }
 
                         if (sceneImageHovered && !panModeEnabled && !clickInModeButtons && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -756,7 +839,7 @@ int Application::run() {
                                 transformRotateAccumDeg = 0.0f;
                                 transformDragStartWorldRotation = viewControls.worldRotationDegrees;
                                 transformDragStartSelectedCenter = selectedCenter;
-                                transformDragStartObjects = sceneObjects;
+                                transformDragStartImportedModel = importedModel;
                             } else {
                                 selectionDragging = true;
                                 selectionStart = io.MousePos;
@@ -793,67 +876,66 @@ int Application::run() {
                             rotateAmountDeg = transformRotateAccumDeg;
                         }
 
-                        for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
-                            if (!selectedObjects[static_cast<std::size_t>(i)]) {
-                                continue;
-                            }
-
-                            const auto& startObj = transformDragStartObjects[static_cast<std::size_t>(i)];
-                            auto& obj = sceneObjects[static_cast<std::size_t>(i)];
+                        if (importedModelSelected && importedModel.has_value() && transformDragStartImportedModel.has_value()) {
+                            auto& modelData = *importedModel;
+                            const auto& startModel = *transformDragStartImportedModel;
 
                             if (transformMode == TransformMode::Move) {
                                 if (activeTransformAxis == TransformAxis::View) {
                                     const glm::vec3 startWorld = screenToWorldAtDepth(transformDragStartMouse, selectedCenterNdcZ);
                                     const glm::vec3 currentWorld = screenToWorldAtDepth(io.MousePos, selectedCenterNdcZ);
                                     const glm::vec3 worldDelta = currentWorld - startWorld;
-                                    obj.position = startObj.position + worldDelta;
-                                    continue;
-                                }
-
-                                const float moveFactor = 0.004f * viewControls.zoomDistance;
-                                if (activeTransformAxis == TransformAxis::X) {
-                                    obj.position.x = startObj.position.x + dragAmount * moveFactor;
-                                } else if (activeTransformAxis == TransformAxis::Y) {
-                                    obj.position.y = startObj.position.y + dragAmount * moveFactor;
-                                } else if (activeTransformAxis == TransformAxis::Z) {
-                                    obj.position.z = startObj.position.z + dragAmount * moveFactor;
+                                    modelData.position = startModel.position + worldDelta;
+                                } else {
+                                    const float moveFactor = 0.004f * viewControls.zoomDistance;
+                                    modelData.position = startModel.position;
+                                    if (activeTransformAxis == TransformAxis::X) {
+                                        modelData.position.x = startModel.position.x + dragAmount * moveFactor;
+                                    } else if (activeTransformAxis == TransformAxis::Y) {
+                                        modelData.position.y = startModel.position.y + dragAmount * moveFactor;
+                                    } else if (activeTransformAxis == TransformAxis::Z) {
+                                        modelData.position.z = startModel.position.z + dragAmount * moveFactor;
+                                    }
                                 }
                             } else if (transformMode == TransformMode::Rotate) {
                                 glm::vec3 rotationAxis(0.0f, 0.0f, 1.0f);
                                 if (activeTransformAxis == TransformAxis::X) {
                                     rotationAxis = glm::vec3(1.0f, 0.0f, 0.0f);
                                 } else if (activeTransformAxis == TransformAxis::Y) {
-                                    rotationAxis = glm::vec3(0.0f, 1.0f, 0.0f);
-                                } else if (activeTransformAxis == TransformAxis::Z) {
                                     rotationAxis = glm::vec3(0.0f, 0.0f, 1.0f);
+                                } else if (activeTransformAxis == TransformAxis::Z) {
+                                    rotationAxis = glm::vec3(0.0f, 1.0f, 0.0f);
                                 } else if (activeTransformAxis == TransformAxis::View) {
                                     rotationAxis = viewRotateAxis;
                                 }
 
-                                const float angleRadians = glm::radians(rotateAmountDeg);
-                                const glm::quat rotation = glm::angleAxis(angleRadians, rotationAxis);
-                                const glm::vec3 relativePos = startObj.position - transformDragStartSelectedCenter;
-                                const glm::vec3 rotatedRelPos = rotation * relativePos;
-                                obj.position = transformDragStartSelectedCenter + rotatedRelPos;
-                                obj.rotationEulerDegrees = startObj.rotationEulerDegrees;
-                            } else {
-                                const float scaleFactor = 1.0f + dragAmount * 0.004f;
-                                const glm::vec3 startRel = startObj.position - transformDragStartSelectedCenter;
-                                glm::vec3 scaledRel = startRel;
-                                glm::vec3 nextScale = startObj.scale;
+                                const glm::quat startRotation = composeRotationXYZDegrees(startModel.rotationEulerDegrees);
+                                float appliedRotateDeg = rotateAmountDeg;
                                 if (activeTransformAxis == TransformAxis::X) {
-                                    scaledRel.x = startRel.x * scaleFactor;
-                                    nextScale.x = std::clamp(startObj.scale.x * scaleFactor, 0.1f, 5.0f);
-                                } else if (activeTransformAxis == TransformAxis::Y) {
-                                    scaledRel.y = startRel.y * scaleFactor;
-                                    nextScale.y = std::clamp(startObj.scale.y * scaleFactor, 0.1f, 5.0f);
-                                } else if (activeTransformAxis == TransformAxis::Z) {
-                                    scaledRel.z = startRel.z * scaleFactor;
-                                    nextScale.z = std::clamp(startObj.scale.z * scaleFactor, 0.1f, 5.0f);
+                                    appliedRotateDeg = -appliedRotateDeg;
                                 }
-                                obj.position = transformDragStartSelectedCenter + scaledRel;
-                                obj.scale = nextScale;
+                                if (activeTransformAxis == TransformAxis::Z) {
+                                    appliedRotateDeg = -appliedRotateDeg;
+                                }
+                                const glm::quat deltaRotation = glm::angleAxis(glm::radians(appliedRotateDeg), glm::normalize(rotationAxis));
+                                glm::quat finalRotation = deltaRotation * startRotation;
+                                if (activeTransformAxis != TransformAxis::View) {
+                                    finalRotation = startRotation * deltaRotation;
+                                }
+                                modelData.rotationEulerDegrees = eulerDegreesFromQuatXYZ(finalRotation);
+                            } else {
+                                const float scaleFactor = std::max(0.05f, 1.0f + dragAmount * 0.004f);
+                                modelData.scale = startModel.scale;
+                                if (activeTransformAxis == TransformAxis::X) {
+                                    modelData.scale.x = std::clamp(startModel.scale.x * scaleFactor, 0.001f, 1000.0f);
+                                } else if (activeTransformAxis == TransformAxis::Y) {
+                                    modelData.scale.y = std::clamp(startModel.scale.y * scaleFactor, 0.001f, 1000.0f);
+                                } else if (activeTransformAxis == TransformAxis::Z) {
+                                    modelData.scale.z = std::clamp(startModel.scale.z * scaleFactor, 0.001f, 1000.0f);
+                                }
                             }
+
+                            renderer.setImportedModelTransform(modelData.position, modelData.rotationEulerDegrees, modelData.scale);
                         }
                     }
 
@@ -878,44 +960,35 @@ int Application::run() {
 
                         static constexpr float kClickDragThreshold = 6.0f;
                         if (width < kClickDragThreshold && height < kClickDragThreshold) {
-                            // Click: select single object or deselect all
-                            int bestIndex = -1;
                             float bestArea = std::numeric_limits<float>::max();
+                            bool bestWasImported = false;
 
-                            for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
+                            if (importedModel.has_value()) {
                                 ImVec2 boxMin(0.0f, 0.0f);
                                 ImVec2 boxMax(0.0f, 0.0f);
-                                if (!computeObjectScreenBounds(sceneObjects[static_cast<std::size_t>(i)], boxMin, boxMax)) {
-                                    continue;
-                                }
-
-                                if (io.MousePos.x >= boxMin.x && io.MousePos.x <= boxMax.x && io.MousePos.y >= boxMin.y && io.MousePos.y <= boxMax.y) {
+                                if (computeImportedScreenBounds(*importedModel, boxMin, boxMax) &&
+                                    io.MousePos.x >= boxMin.x && io.MousePos.x <= boxMax.x &&
+                                    io.MousePos.y >= boxMin.y && io.MousePos.y <= boxMax.y) {
                                     const float area = (boxMax.x - boxMin.x) * (boxMax.y - boxMin.y);
                                     if (area < bestArea) {
                                         bestArea = area;
-                                        bestIndex = i;
+                                        bestWasImported = true;
                                     }
                                 }
                             }
 
-                            // Deselect all, then select closest object if found
-                            std::fill(selectedObjects.begin(), selectedObjects.end(), false);
-                            if (bestIndex >= 0) {
-                                selectedObjects[static_cast<std::size_t>(bestIndex)] = true;
-                            }
+                            importedModelSelected = bestWasImported;
                         } else {
-                            // Box select: deselect all first, then select objects within box
-                            std::fill(selectedObjects.begin(), selectedObjects.end(), false);
-                            for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
+                            importedModelSelected = false;
+
+                            if (importedModel.has_value()) {
                                 ImVec2 boxMin(0.0f, 0.0f);
                                 ImVec2 boxMax(0.0f, 0.0f);
-                                if (!computeObjectScreenBounds(sceneObjects[static_cast<std::size_t>(i)], boxMin, boxMax)) {
-                                    continue;
-                                }
-
-                                const bool intersects = !(boxMax.x < minX || boxMin.x > maxX || boxMax.y < minY || boxMin.y > maxY);
-                                if (intersects) {
-                                    selectedObjects[static_cast<std::size_t>(i)] = true;
+                                if (computeImportedScreenBounds(*importedModel, boxMin, boxMax)) {
+                                    const bool intersects = !(boxMax.x < minX || boxMin.x > maxX || boxMax.y < minY || boxMin.y > maxY);
+                                    if (intersects) {
+                                        importedModelSelected = true;
+                                    }
                                 }
                             }
                         }
@@ -1070,6 +1143,155 @@ int Application::run() {
                     ImGui::EndTabItem();
                 }
 
+                if (ImGui::BeginTabItem("Rigging")) {
+                    ImGui::TextUnformatted("T-Pose Character Rig");
+                    ImGui::Separator();
+                    ImGui::TextWrapped("Template humanoid rig for T-pose setup. Edit bone offsets/rotations and lengths, then use symmetry for left-right limbs.");
+
+                    if (ImGui::Button("Reset T-Pose Template")) {
+                        rigBones = createDefaultTPoseRig();
+                        selectedRigBone = 0;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Mirror Left -> Right")) {
+                        for (std::size_t i = 0; i < rigBones.size(); ++i) {
+                            const std::string& name = rigBones[i].name;
+                            if (name.size() > 2 && endsWith(name, "_L")) {
+                                std::string rightName = name.substr(0, name.size() - 2) + "_R";
+                                for (std::size_t j = 0; j < rigBones.size(); ++j) {
+                                    if (rigBones[j].name == rightName) {
+                                        rigBones[j].localPosition = rigBones[i].localPosition;
+                                        rigBones[j].localPosition.x = -rigBones[j].localPosition.x;
+                                        rigBones[j].localRotationDegrees = rigBones[i].localRotationDegrees;
+                                        rigBones[j].localRotationDegrees.y = -rigBones[j].localRotationDegrees.y;
+                                        rigBones[j].localRotationDegrees.z = -rigBones[j].localRotationDegrees.z;
+                                        rigBones[j].length = rigBones[i].length;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    const float rigEditorHeight = std::max(200.0f, ImGui::GetContentRegionAvail().y * 0.52f);
+                    ImGui::BeginChild("RigEditor", ImVec2(0.0f, rigEditorHeight), true);
+                    ImGui::BeginChild("RigHierarchy", ImVec2(220.0f, 0.0f), true);
+                    ImGui::TextUnformatted("Bones");
+                    ImGui::Separator();
+                    for (int i = 0; i < static_cast<int>(rigBones.size()); ++i) {
+                        const bool isSelected = (selectedRigBone == i);
+                        if (ImGui::Selectable(rigBones[static_cast<std::size_t>(i)].name.c_str(), isSelected)) {
+                            selectedRigBone = i;
+                        }
+                    }
+                    ImGui::EndChild();
+
+                    ImGui::SameLine();
+
+                    ImGui::BeginChild("RigProperties", ImVec2(0.0f, 0.0f), true);
+                    if (!rigBones.empty()) {
+                        selectedRigBone = std::clamp(selectedRigBone, 0, static_cast<int>(rigBones.size()) - 1);
+                        RigBone& bone = rigBones[static_cast<std::size_t>(selectedRigBone)];
+                        ImGui::Text("Selected: %s", bone.name.c_str());
+                        ImGui::Separator();
+                        ImGui::DragFloat3("Local Position", &bone.localPosition.x, 0.005f, -1.0f, 1.0f, "%.3f");
+                        ImGui::DragFloat3("Local Rotation", &bone.localRotationDegrees.x, 0.5f, -180.0f, 180.0f, "%.1f deg");
+                        ImGui::DragFloat("Bone Length", &bone.length, 0.002f, 0.01f, 0.8f, "%.3f");
+                        if (bone.parentIndex >= 0 && bone.parentIndex < static_cast<int>(rigBones.size())) {
+                            ImGui::Text("Parent: %s", rigBones[static_cast<std::size_t>(bone.parentIndex)].name.c_str());
+                        } else {
+                            ImGui::TextUnformatted("Parent: <root>");
+                        }
+                    }
+                    ImGui::EndChild();
+                    ImGui::EndChild();
+
+                    ImGui::BeginChild("RigPreview", ImVec2(0.0f, 0.0f), true);
+                    ImGui::TextUnformatted("T-Pose Preview");
+                    ImGui::Separator();
+
+                    std::vector<glm::quat> worldRotations(rigBones.size(), glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
+                    std::vector<glm::vec3> boneStarts(rigBones.size(), glm::vec3(0.0f));
+                    std::vector<glm::vec3> boneEnds(rigBones.size(), glm::vec3(0.0f));
+
+                    for (std::size_t i = 0; i < rigBones.size(); ++i) {
+                        const RigBone& bone = rigBones[i];
+                        const glm::quat localRot = composeRotationXYZDegrees(bone.localRotationDegrees);
+                        const bool hasParent = bone.parentIndex >= 0 && bone.parentIndex < static_cast<int>(rigBones.size());
+
+                        if (hasParent) {
+                            const std::size_t parent = static_cast<std::size_t>(bone.parentIndex);
+                            boneStarts[i] = boneEnds[parent] + bone.localPosition;
+                            worldRotations[i] = glm::normalize(worldRotations[parent] * localRot);
+                        } else {
+                            boneStarts[i] = bone.localPosition;
+                            worldRotations[i] = glm::normalize(localRot);
+                        }
+
+                        boneEnds[i] = boneStarts[i] + worldRotations[i] * glm::vec3(0.0f, bone.length, 0.0f);
+                    }
+
+                    ImDrawList* rigDrawList = ImGui::GetWindowDrawList();
+                    const ImVec2 canvasMin = ImGui::GetCursorScreenPos();
+                    const ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+                    const ImVec2 canvasMax(canvasMin.x + canvasSize.x, canvasMin.y + canvasSize.y);
+                    rigDrawList->AddRectFilled(canvasMin, canvasMax, IM_COL32(18, 20, 26, 255));
+                    rigDrawList->AddRect(canvasMin, canvasMax, IM_COL32(62, 70, 84, 255), 0.0f, 0, 1.0f);
+
+                    if (!rigBones.empty() && canvasSize.x > 10.0f && canvasSize.y > 10.0f) {
+                        float minX = std::numeric_limits<float>::max();
+                        float minY = std::numeric_limits<float>::max();
+                        float maxX = std::numeric_limits<float>::lowest();
+                        float maxY = std::numeric_limits<float>::lowest();
+
+                        for (std::size_t i = 0; i < rigBones.size(); ++i) {
+                            minX = std::min(minX, std::min(boneStarts[i].x, boneEnds[i].x));
+                            minY = std::min(minY, std::min(boneStarts[i].y, boneEnds[i].y));
+                            maxX = std::max(maxX, std::max(boneStarts[i].x, boneEnds[i].x));
+                            maxY = std::max(maxY, std::max(boneStarts[i].y, boneEnds[i].y));
+                        }
+
+                        const float width = std::max(0.001f, maxX - minX);
+                        const float height = std::max(0.001f, maxY - minY);
+                        const float pad = 22.0f;
+                        const float sx = (canvasSize.x - pad * 2.0f) / width;
+                        const float sy = (canvasSize.y - pad * 2.0f) / height;
+                        const float scale = std::max(1.0f, std::min(sx, sy));
+
+                        auto toCanvas = [&](const glm::vec3& p) {
+                            const float nx = (p.x - minX) * scale + pad;
+                            const float ny = (p.y - minY) * scale + pad;
+                            return ImVec2(canvasMin.x + nx, canvasMax.y - ny);
+                        };
+
+                        for (std::size_t i = 0; i < rigBones.size(); ++i) {
+                            const ImVec2 a = toCanvas(boneStarts[i]);
+                            const ImVec2 b = toCanvas(boneEnds[i]);
+                            const bool selected = static_cast<int>(i) == selectedRigBone;
+                            const bool isLeft = endsWith(rigBones[i].name, "_L");
+                            const bool isRight = endsWith(rigBones[i].name, "_R");
+                            ImU32 color = IM_COL32(230, 230, 230, 255);
+                            if (isLeft) {
+                                color = IM_COL32(108, 193, 255, 255);
+                            } else if (isRight) {
+                                color = IM_COL32(255, 168, 108, 255);
+                            }
+                            if (selected) {
+                                color = IM_COL32(255, 230, 120, 255);
+                            }
+
+                            rigDrawList->AddLine(a, b, color, selected ? 3.5f : 2.0f);
+                            rigDrawList->AddCircleFilled(a, selected ? 4.0f : 3.0f, IM_COL32(245, 245, 245, 245), 16);
+                            rigDrawList->AddCircleFilled(b, selected ? 4.0f : 3.0f, color, 16);
+                        }
+                    }
+
+                    ImGui::Dummy(canvasSize);
+                    ImGui::EndChild();
+
+                    ImGui::EndTabItem();
+                }
+
                 ImGui::EndTabBar();
             }
         }
@@ -1098,18 +1320,12 @@ int Application::run() {
         ImGui::BeginChild("HierarchyPane", ImVec2(0.0f, hierarchyHeight), true);
         ImGui::TextUnformatted("Hierarchy");
         ImGui::Separator();
-        for (int i = 0; i < static_cast<int>(sceneObjects.size()); ++i) {
-            char label[48];
-            std::snprintf(label, sizeof(label), "Cube %d", i + 1);
-            const bool isSelected = selectedObjects[static_cast<std::size_t>(i)];
-            if (ImGui::Selectable(label, isSelected)) {
-                if (!io.KeyCtrl) {
-                    std::fill(selectedObjects.begin(), selectedObjects.end(), false);
-                    selectedObjects[static_cast<std::size_t>(i)] = true;
-                } else {
-                    selectedObjects[static_cast<std::size_t>(i)] = !selectedObjects[static_cast<std::size_t>(i)];
-                }
+        if (importedModel.has_value()) {
+            if (ImGui::Selectable("Imported FBX", importedModelSelected)) {
+                importedModelSelected = true;
             }
+        } else {
+            ImGui::TextDisabled("No imported model");
         }
         ImGui::EndChild();
 
@@ -1126,7 +1342,20 @@ int Application::run() {
         }
 
         ImGui::BeginChild("PropertiesPane", ImVec2(0.0f, contentHeight), true);
-        propertyPanel.draw(sceneObjects, selectedObjects);
+        if (importedModelSelected && importedModel.has_value()) {
+            ImGui::TextUnformatted("Imported FBX");
+            ImGui::Separator();
+            bool transformChanged = false;
+            transformChanged |= ImGui::DragFloat3("Position", &importedModel->position.x, 0.01f, -1000.0f, 1000.0f);
+            transformChanged |= ImGui::DragFloat3("Rotation", &importedModel->rotationEulerDegrees.x, 0.5f, -360.0f, 360.0f);
+            transformChanged |= ImGui::DragFloat3("Scale", &importedModel->scale.x, 0.01f, 0.001f, 1000.0f, "%.3f");
+            ImGui::Text("Dimensions: %s", formatVec3(importedModelWorldDimensions(*importedModel)).c_str());
+            if (transformChanged) {
+                renderer.setImportedModelTransform(importedModel->position, importedModel->rotationEulerDegrees, importedModel->scale);
+            }
+        } else {
+            ImGui::TextDisabled("Select an imported FBX to edit properties.");
+        }
         ImGui::EndChild();
         ImGui::EndChild();
 
@@ -1177,7 +1406,7 @@ void Application::initializeWindow() {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
 
-    m_window = glfwCreateWindow(1600, 900, "SparksEngine - Cube Editor", nullptr, nullptr);
+    m_window = glfwCreateWindow(1600, 900, "SparksEngine - FBX Editor", nullptr, nullptr);
     if (m_window == nullptr) {
         throw std::runtime_error("Failed to create GLFW window.");
     }
