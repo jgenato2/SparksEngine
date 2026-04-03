@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <random>
 #include <string>
 
 #define GLM_ENABLE_EXPERIMENTAL
@@ -31,6 +33,52 @@ std::string formatVec3(const glm::vec3& value) {
     char buffer[96];
     std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", value.x, value.y, value.z);
     return std::string(buffer);
+}
+
+std::uint32_t randomCloudPlaneSeed() {
+    static std::mt19937 rng(std::random_device{}());
+    static std::uniform_int_distribution<std::uint32_t> dist(1u, 0xffffffffu);
+    return dist(rng);
+}
+
+void applyCloudTypePreset(render::CloudObjectSettings& cloud, const int cloudType) {
+    cloud.cloudType = std::clamp(cloudType, 0, 2);
+
+    const float horizontalSpan = std::max(std::max(std::abs(cloud.scale.x), std::abs(cloud.scale.z)), 1.0f);
+    if (cloud.cloudType == 0) {
+        cloud.opacity = 0.88f;
+        cloud.softness = 0.68f;
+        cloud.detail = 2.1f;
+        cloud.motionSpeed = 1.8f;
+        cloud.glowStrength = 0.34f;
+        cloud.planeFade = 0.92f;
+        cloud.planeCount = 14;
+        cloud.cubeSpread = 1.00f;
+        cloud.scale.y = std::clamp(horizontalSpan * 0.50f, 0.75f, 8.0f);
+        cloud.color = glm::vec3(0.93f, 0.96f, 1.0f);
+    } else if (cloud.cloudType == 1) {
+        cloud.opacity = 0.74f;
+        cloud.softness = 0.92f;
+        cloud.detail = 1.25f;
+        cloud.motionSpeed = 0.70f;
+        cloud.glowStrength = 0.14f;
+        cloud.planeFade = 0.98f;
+        cloud.planeCount = 18;
+        cloud.cubeSpread = 1.42f;
+        cloud.scale.y = std::clamp(horizontalSpan * 0.22f, 0.35f, 3.5f);
+        cloud.color = glm::vec3(0.85f, 0.91f, 0.98f);
+    } else {
+        cloud.opacity = 0.54f;
+        cloud.softness = 0.95f;
+        cloud.detail = 3.0f;
+        cloud.motionSpeed = 3.25f;
+        cloud.glowStrength = 0.18f;
+        cloud.planeFade = 0.96f;
+        cloud.planeCount = 10;
+        cloud.cubeSpread = 1.88f;
+        cloud.scale.y = std::clamp(horizontalSpan * 0.14f, 0.20f, 2.2f);
+        cloud.color = glm::vec3(0.90f, 0.96f, 1.0f);
+    }
 }
 
 bool endsWith(const std::string& value, const char* suffix) {
@@ -1454,6 +1502,11 @@ void drawRightPane(
         cloudChanged |= ImGui::DragFloat3("Position", &cloud.position.x, 0.05f, -200.0f, 200.0f, "%.2f");
         cloudChanged |= ImGui::DragFloat3("Rotation", &cloud.rotationEulerDegrees.x, 0.5f, -180.0f, 180.0f, "%.1f deg");
         cloudChanged |= ImGui::DragFloat3("Scale", &cloud.scale.x, 0.03f, 0.05f, 20.0f, "%.2f");
+        int cloudType = cloud.cloudType;
+        if (ImGui::Combo("Cloud Type", &cloudType, "Cumulus\0Stratus\0Cirrus\0")) {
+            applyCloudTypePreset(cloud, cloudType);
+            cloudChanged = true;
+        }
         cloudChanged |= ImGui::ColorEdit3("Cloud Color", &cloud.color.x);
         cloudChanged |= ImGui::SliderFloat("Opacity", &cloud.opacity, 0.0f, 1.0f, "%.2f");
         cloudChanged |= ImGui::SliderFloat("Softness", &cloud.softness, 0.2f, 0.98f, "%.2f");
@@ -1461,7 +1514,10 @@ void drawRightPane(
         cloudChanged |= ImGui::SliderFloat("Motion Speed", &cloud.motionSpeed, 0.0f, 8.0f, "%.2f");
         cloudChanged |= ImGui::SliderFloat("Glow", &cloud.glowStrength, 0.0f, 1.0f, "%.2f");
         cloudChanged |= ImGui::SliderFloat("Plane Fade", &cloud.planeFade, 0.0f, 1.0f, "%.2f");
-        cloudChanged |= ImGui::SliderInt("Plane Count", &cloud.planeCount, 1, 28);
+        if (ImGui::SliderInt("Plane Count", &cloud.planeCount, 1, 28)) {
+            cloud.planeSelectionSeed = randomCloudPlaneSeed();
+            cloudChanged = true;
+        }
         cloudChanged |= ImGui::SliderFloat("Cube Spread", &cloud.cubeSpread, 0.35f, 2.50f, "%.2f");
 
         if (cloudChanged) {
@@ -1486,6 +1542,15 @@ void drawRightPane(
             bool cloudChanged = false;
 
             // Appearance controls apply to all selected clouds
+            int sharedType = refCloud.cloudType;
+            if (ImGui::Combo("Cloud Type", &sharedType, "Cumulus\0Stratus\0Cirrus\0")) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        applyCloudTypePreset(environmentSettings.cloudObjects[idx], sharedType);
+                    }
+                }
+                cloudChanged = true;
+            }
             if (ImGui::ColorEdit3("Cloud Color", &refCloud.color.x)) {
                 for (const int idx : selectedCloudIndices) {
                     if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
@@ -1546,6 +1611,7 @@ void drawRightPane(
                 for (const int idx : selectedCloudIndices) {
                     if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
                         environmentSettings.cloudObjects[idx].planeCount = refCloud.planeCount;
+                        environmentSettings.cloudObjects[idx].planeSelectionSeed = randomCloudPlaneSeed();
                     }
                 }
                 cloudChanged = true;

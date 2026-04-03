@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include <glm/vec2.hpp>
@@ -48,6 +49,8 @@ struct CloudObjectSettings {
     float cubeSpread{1.0f};
     float glowStrength{0.50f};
     float motionSpeed{1.0f};
+    int cloudType{0}; // 0: Cumulus, 1: Stratus, 2: Cirrus
+    std::uint32_t planeSelectionSeed{1u};
 };
 
 struct EnvironmentSettings {
@@ -55,8 +58,8 @@ struct EnvironmentSettings {
     float skydomeRadius{220.0f};
     float skydomePitchDegrees{90.0f};
     float skydomeYawDegrees{0.0f};
-    glm::vec3 skyHorizonColor{0.55f, 0.67f, 0.83f};
-    glm::vec3 skyZenithColor{0.10f, 0.18f, 0.32f};
+    glm::vec3 skyHorizonColor{0.70f, 0.82f, 0.95f};
+    glm::vec3 skyZenithColor{0.35f, 0.55f, 0.82f};
     glm::vec3 skyCloudColor{0.82f, 0.87f, 0.93f};
     float skyCloudAmount{0.18f};
     float skyCloudScale{1.0f};
@@ -142,6 +145,20 @@ private:
     unsigned int m_cloudEbo{0};
     int m_cloudIndexCount{0};
     std::vector<glm::vec3> m_cloudCardCenters{};
+    int m_cloudMvpLoc{-1};
+    int m_cloudModelLoc{-1};
+    int m_cloudColorLoc{-1};
+    int m_cloudOpacityLoc{-1};
+    int m_cloudSoftnessLoc{-1};
+    int m_cloudDetailLoc{-1};
+    int m_cloudPlaneFadeLoc{-1};
+    int m_cloudSpreadLoc{-1};
+    int m_cloudCameraLoc{-1};
+    int m_cloudLightDirLoc{-1};
+    int m_cloudGlowLoc{-1};
+    int m_cloudTimeLoc{-1};
+    int m_cloudMotionSpeedLoc{-1};
+    int m_cloudTypeLoc{-1};
 
     unsigned int m_texturedProgram{0};
     unsigned int m_importVao{0};

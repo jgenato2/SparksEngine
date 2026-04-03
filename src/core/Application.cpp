@@ -484,6 +484,8 @@ int Application::run() {
                         std::uniform_real_distribution<float> opDist(0.55f, 0.90f);
                         std::uniform_real_distribution<float> softDist(0.70f, 0.95f);
                         std::uniform_real_distribution<float> detailDist(0.7f, 1.5f);
+                        std::uniform_int_distribution<int> typeDist(0, 2);
+                        std::uniform_int_distribution<unsigned int> seedDist(1u, 0xffffffffu);
 
                         for (int i = 0; i < scatterCloudCount; ++i) {
                             sparks::render::CloudObjectSettings cloud;
@@ -499,6 +501,8 @@ int Application::run() {
                             cloud.planeCount = 12;
                             cloud.cubeSpread = 1.0f;
                             cloud.motionSpeed = 1.0f;
+                            cloud.cloudType = typeDist(rng);
+                            cloud.planeSelectionSeed = seedDist(rng);
                             environmentSettings.cloudObjects.push_back(cloud);
                         }
 
@@ -523,6 +527,12 @@ int Application::run() {
                         cloud.planeCount = 12;
                         cloud.cubeSpread = 1.0f;
                         cloud.motionSpeed = 1.0f;
+                        cloud.cloudType = 0;
+                        {
+                            static std::mt19937 seedRng(std::random_device{}());
+                            static std::uniform_int_distribution<unsigned int> seedDist(1u, 0xffffffffu);
+                            cloud.planeSelectionSeed = seedDist(seedRng);
+                        }
                         environmentSettings.cloudObjects.push_back(cloud);
                         environmentSettings.enableCloudObjects = true;
                         selectedCloudIndices = {static_cast<int>(environmentSettings.cloudObjects.size()) - 1};
