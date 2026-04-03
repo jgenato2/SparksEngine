@@ -34,6 +34,8 @@ void drawSceneTab(
     render::Renderer& renderer,
     ImGuiIO& io,
     render::ViewControls& viewControls,
+    render::EnvironmentSettings& environmentSettings,
+    std::vector<int>& selectedCloudIndices,
     bool panModeEnabled,
     TransformMode& transformMode,
     TransformAxis& activeTransformAxis,
@@ -48,6 +50,7 @@ void drawSceneTab(
     ImVec2& selectionEnd,
     std::optional<render::ImportedModelData>& importedModel,
     std::optional<render::ImportedModelData>& transformDragStartImportedModel,
+    std::vector<render::CloudObjectSettings>& transformDragStartClouds,
     bool& importedModelSelected);
 
 void drawRiggingTab(
@@ -69,6 +72,8 @@ void drawRightPane(
     float contentHeight,
     ImGuiIO& io,
     render::Renderer& renderer,
+    render::EnvironmentSettings& environmentSettings,
+    std::vector<int>& selectedCloudIndices,
     std::optional<render::ImportedModelData>& importedModel,
     bool& importedModelSelected);
 

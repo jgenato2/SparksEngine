@@ -84,6 +84,8 @@ void drawSceneTab(
     render::Renderer& renderer,
     ImGuiIO& io,
     render::ViewControls& viewControls,
+    render::EnvironmentSettings& environmentSettings,
+    std::vector<int>& selectedCloudIndices,
     bool panModeEnabled,
     TransformMode& transformMode,
     TransformAxis& activeTransformAxis,
@@ -98,6 +100,7 @@ void drawSceneTab(
     ImVec2& selectionEnd,
     std::optional<render::ImportedModelData>& importedModel,
     std::optional<render::ImportedModelData>& transformDragStartImportedModel,
+    std::vector<render::CloudObjectSettings>& transformDragStartClouds,
     bool& importedModelSelected) {
     if (!ImGui::BeginTabItem("Scene")) {
         return;
@@ -212,6 +215,63 @@ void drawSceneTab(
         return true;
     };
 
+    auto computeCloudScreenBounds = [&](const render::CloudObjectSettings& cloud, ImVec2& outMin, ImVec2& outMax) {
+        const glm::vec3 halfExtent = glm::abs(cloud.scale) * 0.5f;
+        if (halfExtent.x <= 0.0f || halfExtent.y <= 0.0f || halfExtent.z <= 0.0f) {
+            return false;
+        }
+
+        static constexpr std::array<glm::vec3, 8> kLocalCorners = {
+            glm::vec3(-1.0f, -1.0f, -1.0f),
+            glm::vec3( 1.0f, -1.0f, -1.0f),
+            glm::vec3( 1.0f,  1.0f, -1.0f),
+            glm::vec3(-1.0f,  1.0f, -1.0f),
+            glm::vec3(-1.0f, -1.0f,  1.0f),
+            glm::vec3( 1.0f, -1.0f,  1.0f),
+            glm::vec3( 1.0f,  1.0f,  1.0f),
+            glm::vec3(-1.0f,  1.0f,  1.0f),
+        };
+
+        glm::mat4 model(1.0f);
+        model = glm::translate(model, cloud.position);
+        const glm::vec3 rot = glm::radians(cloud.rotationEulerDegrees);
+        model = glm::rotate(model, rot.x, glm::vec3(1.0f, 0.0f, 0.0f));
+        model = glm::rotate(model, rot.y, glm::vec3(0.0f, 1.0f, 0.0f));
+        model = glm::rotate(model, rot.z, glm::vec3(0.0f, 0.0f, 1.0f));
+
+        const glm::mat4 mvp = projection * view * world * model;
+        float minX = std::numeric_limits<float>::max();
+        float minY = std::numeric_limits<float>::max();
+        float maxX = -std::numeric_limits<float>::max();
+        float maxY = -std::numeric_limits<float>::max();
+        bool hasPoint = false;
+
+        for (const glm::vec3& corner : kLocalCorners) {
+            const glm::vec3 localCorner = corner * halfExtent;
+            const glm::vec4 clip = mvp * glm::vec4(localCorner, 1.0f);
+            if (clip.w <= 0.0f) {
+                continue;
+            }
+
+            const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            const float sx = imgMin.x + (ndc.x * 0.5f + 0.5f) * viewportSize.x;
+            const float sy = imgMin.y + (1.0f - (ndc.y * 0.5f + 0.5f)) * viewportSize.y;
+            minX = std::min(minX, sx);
+            minY = std::min(minY, sy);
+            maxX = std::max(maxX, sx);
+            maxY = std::max(maxY, sy);
+            hasPoint = true;
+        }
+
+        if (!hasPoint) {
+            return false;
+        }
+
+        outMin = ImVec2(minX, minY);
+        outMax = ImVec2(maxX, maxY);
+        return true;
+    };
+
     auto projectPointToScreen = [&](const glm::vec3& worldPosition) {
         const glm::vec4 clip = projection * view * world * glm::vec4(worldPosition, 1.0f);
         if (clip.w <= 0.0f) {
@@ -279,6 +339,16 @@ void drawSceneTab(
         boundMin = glm::min(boundMin, importedModel->position - halfExtent);
         boundMax = glm::max(boundMax, importedModel->position + halfExtent);
         ++selectedCount;
+    }
+    for (const int cloudIdx : selectedCloudIndices) {
+        if (cloudIdx >= 0 && cloudIdx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+            const auto& cloud = environmentSettings.cloudObjects[cloudIdx];
+            selectedCenter += cloud.position;
+            const glm::vec3 halfExtent = glm::abs(cloud.scale) * 0.5f;
+            boundMin = glm::min(boundMin, cloud.position - halfExtent);
+            boundMax = glm::max(boundMax, cloud.position + halfExtent);
+            ++selectedCount;
+        }
     }
     const bool hasSelection = selectedCount > 0;
     if (hasSelection) {
@@ -403,6 +473,14 @@ void drawSceneTab(
         transformDragStartWorldRotation = viewControls.worldRotationDegrees;
         transformDragStartSelectedCenter = selectedCenter;
         transformDragStartImportedModel = importedModel;
+        transformDragStartClouds.clear();
+        for (const int idx : selectedCloudIndices) {
+            if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                transformDragStartClouds.push_back(environmentSettings.cloudObjects[idx]);
+            } else {
+                transformDragStartClouds.push_back(render::CloudObjectSettings{});
+            }
+        }
     }
 
     if (sceneImageHovered && !panModeEnabled && !clickInModeButtons && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -415,6 +493,14 @@ void drawSceneTab(
             transformDragStartWorldRotation = viewControls.worldRotationDegrees;
             transformDragStartSelectedCenter = selectedCenter;
             transformDragStartImportedModel = importedModel;
+            transformDragStartClouds.clear();
+            for (const int idx : selectedCloudIndices) {
+                if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                    transformDragStartClouds.push_back(environmentSettings.cloudObjects[idx]);
+                } else {
+                    transformDragStartClouds.push_back(render::CloudObjectSettings{});
+                }
+            }
         } else {
             selectionDragging = true;
             selectionStart = io.MousePos;
@@ -511,6 +597,72 @@ void drawSceneTab(
             }
 
             renderer.setImportedModelTransform(modelData.position, modelData.rotationEulerDegrees, modelData.scale);
+        } else if (!selectedCloudIndices.empty() && !transformDragStartClouds.empty()) {
+            for (int i = 0; i < static_cast<int>(selectedCloudIndices.size()) && i < static_cast<int>(transformDragStartClouds.size()); ++i) {
+                const int cloudIdx = selectedCloudIndices[i];
+                if (cloudIdx < 0 || cloudIdx >= static_cast<int>(environmentSettings.cloudObjects.size())) {
+                    continue;
+                }
+                auto& cloud = environmentSettings.cloudObjects[cloudIdx];
+                const auto& startCloud = transformDragStartClouds[i];
+
+                if (transformMode == TransformMode::Move) {
+                    if (activeTransformAxis == TransformAxis::View) {
+                        const glm::vec3 startWorld = screenToWorldAtDepth(transformDragStartMouse, selectedCenterNdcZ);
+                        const glm::vec3 currentWorld = screenToWorldAtDepth(io.MousePos, selectedCenterNdcZ);
+                        const glm::vec3 worldDelta = currentWorld - startWorld;
+                        cloud.position = startCloud.position + worldDelta;
+                    } else {
+                        const float moveFactor = 0.004f * viewControls.zoomDistance;
+                        cloud.position = startCloud.position;
+                        if (activeTransformAxis == TransformAxis::X) {
+                            cloud.position.x = startCloud.position.x + dragAmount * moveFactor;
+                        } else if (activeTransformAxis == TransformAxis::Y) {
+                            cloud.position.y = startCloud.position.y + dragAmount * moveFactor;
+                        } else if (activeTransformAxis == TransformAxis::Z) {
+                            cloud.position.z = startCloud.position.z + dragAmount * moveFactor;
+                        }
+                    }
+                } else if (transformMode == TransformMode::Rotate) {
+                    glm::vec3 rotationAxis(0.0f, 0.0f, 1.0f);
+                    if (activeTransformAxis == TransformAxis::X) {
+                        rotationAxis = glm::vec3(1.0f, 0.0f, 0.0f);
+                    } else if (activeTransformAxis == TransformAxis::Y) {
+                        rotationAxis = glm::vec3(0.0f, 0.0f, 1.0f);
+                    } else if (activeTransformAxis == TransformAxis::Z) {
+                        rotationAxis = glm::vec3(0.0f, 1.0f, 0.0f);
+                    } else if (activeTransformAxis == TransformAxis::View) {
+                        rotationAxis = viewRotateAxis;
+                    }
+
+                    const glm::quat startRotation = composeRotationXYZDegrees(startCloud.rotationEulerDegrees);
+                    float appliedRotateDeg = rotateAmountDeg;
+                    if (activeTransformAxis == TransformAxis::X) {
+                        appliedRotateDeg = -appliedRotateDeg;
+                    }
+                    if (activeTransformAxis == TransformAxis::Z) {
+                        appliedRotateDeg = -appliedRotateDeg;
+                    }
+                    const glm::quat deltaRotation = glm::angleAxis(glm::radians(appliedRotateDeg), glm::normalize(rotationAxis));
+                    glm::quat finalRotation = deltaRotation * startRotation;
+                    if (activeTransformAxis != TransformAxis::View) {
+                        finalRotation = startRotation * deltaRotation;
+                    }
+                    cloud.rotationEulerDegrees = eulerDegreesFromQuatXYZ(finalRotation);
+                } else {
+                    const float scaleFactor = std::max(0.05f, 1.0f + dragAmount * 0.004f);
+                    cloud.scale = startCloud.scale;
+                    if (activeTransformAxis == TransformAxis::X) {
+                        cloud.scale.x = std::clamp(startCloud.scale.x * scaleFactor, 0.05f, 1000.0f);
+                    } else if (activeTransformAxis == TransformAxis::Y) {
+                        cloud.scale.y = std::clamp(startCloud.scale.y * scaleFactor, 0.05f, 1000.0f);
+                    } else if (activeTransformAxis == TransformAxis::Z) {
+                        cloud.scale.z = std::clamp(startCloud.scale.z * scaleFactor, 0.05f, 1000.0f);
+                    }
+                }
+            }
+
+            renderer.setEnvironmentSettings(environmentSettings);
         }
     }
 
@@ -537,6 +689,7 @@ void drawSceneTab(
         if (width < kClickDragThreshold && height < kClickDragThreshold) {
             float bestArea = std::numeric_limits<float>::max();
             bool bestWasImported = false;
+            int bestCloudIndex = -1;
 
             if (importedModel.has_value()) {
                 ImVec2 boxMin(0.0f, 0.0f);
@@ -552,9 +705,42 @@ void drawSceneTab(
                 }
             }
 
-            importedModelSelected = bestWasImported;
+            for (int cloudIndex = 0; cloudIndex < static_cast<int>(environmentSettings.cloudObjects.size()); ++cloudIndex) {
+                ImVec2 boxMin(0.0f, 0.0f);
+                ImVec2 boxMax(0.0f, 0.0f);
+                if (computeCloudScreenBounds(environmentSettings.cloudObjects[cloudIndex], boxMin, boxMax) &&
+                    io.MousePos.x >= boxMin.x && io.MousePos.x <= boxMax.x &&
+                    io.MousePos.y >= boxMin.y && io.MousePos.y <= boxMax.y) {
+                    const float area = (boxMax.x - boxMin.x) * (boxMax.y - boxMin.y);
+                    if (area < bestArea) {
+                        bestArea = area;
+                        bestWasImported = false;
+                        bestCloudIndex = cloudIndex;
+                    }
+                }
+            }
+
+            if (io.KeyCtrl && !bestWasImported && bestCloudIndex >= 0) {
+                // Ctrl+click: toggle cloud membership without changing FBX selection
+                const auto it = std::find(selectedCloudIndices.begin(), selectedCloudIndices.end(), bestCloudIndex);
+                if (it != selectedCloudIndices.end()) {
+                    selectedCloudIndices.erase(it);
+                } else {
+                    selectedCloudIndices.push_back(bestCloudIndex);
+                    importedModelSelected = false;
+                }
+            } else {
+                importedModelSelected = bestWasImported;
+                selectedCloudIndices.clear();
+                if (!bestWasImported && bestCloudIndex >= 0) {
+                    selectedCloudIndices.push_back(bestCloudIndex);
+                }
+            }
         } else {
-            importedModelSelected = false;
+            if (!io.KeyCtrl) {
+                importedModelSelected = false;
+                selectedCloudIndices.clear();
+            }
 
             if (importedModel.has_value()) {
                 ImVec2 boxMin(0.0f, 0.0f);
@@ -563,6 +749,20 @@ void drawSceneTab(
                     const bool intersects = !(boxMax.x < minX || boxMin.x > maxX || boxMax.y < minY || boxMin.y > maxY);
                     if (intersects) {
                         importedModelSelected = true;
+                    }
+                }
+            }
+
+            for (int cloudIndex = 0; cloudIndex < static_cast<int>(environmentSettings.cloudObjects.size()); ++cloudIndex) {
+                ImVec2 boxMin(0.0f, 0.0f);
+                ImVec2 boxMax(0.0f, 0.0f);
+                if (computeCloudScreenBounds(environmentSettings.cloudObjects[cloudIndex], boxMin, boxMax)) {
+                    const bool intersects = !(boxMax.x < minX || boxMin.x > maxX || boxMax.y < minY || boxMin.y > maxY);
+                    if (intersects) {
+                        const auto it = std::find(selectedCloudIndices.begin(), selectedCloudIndices.end(), cloudIndex);
+                        if (it == selectedCloudIndices.end()) {
+                            selectedCloudIndices.push_back(cloudIndex);
+                        }
                     }
                 }
             }
@@ -1071,11 +1271,77 @@ void drawRightPane(
     const float contentHeight,
     ImGuiIO& io,
     render::Renderer& renderer,
+    render::EnvironmentSettings& environmentSettings,
+    std::vector<int>& selectedCloudIndices,
     std::optional<render::ImportedModelData>& importedModel,
     bool& importedModelSelected) {
     ImGui::BeginChild("RightPane", ImVec2(0.0f, contentHeight), false, ImGuiWindowFlags_NoScrollbar);
     static float hierarchyHeight = 170.0f;
+    static std::optional<render::ImportedModelData> importedModelClipboard;
+    static std::vector<render::CloudObjectSettings> cloudClipboard;
     hierarchyHeight = std::clamp(hierarchyHeight, 110.0f, contentHeight - 140.0f);
+
+    auto copySelectedObjects = [&]() {
+        importedModelClipboard.reset();
+        cloudClipboard.clear();
+
+        if (importedModelSelected && importedModel.has_value()) {
+            importedModelClipboard = importedModel;
+        }
+
+        for (const int idx : selectedCloudIndices) {
+            if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                cloudClipboard.push_back(environmentSettings.cloudObjects[idx]);
+            }
+        }
+    };
+
+    auto pasteObjects = [&]() {
+        if (!importedModelClipboard.has_value() && cloudClipboard.empty()) {
+            return;
+        }
+
+        bool pastedImported = false;
+        bool pastedClouds = false;
+
+        if (importedModelClipboard.has_value()) {
+            importedModel = importedModelClipboard;
+            if (importedModel.has_value()) {
+                renderer.setImportedModel(*importedModel);
+                renderer.setImportedModelTransform(importedModel->position, importedModel->rotationEulerDegrees, importedModel->scale);
+            }
+            pastedImported = true;
+        }
+
+        selectedCloudIndices.clear();
+        for (std::size_t i = 0; i < cloudClipboard.size(); ++i) {
+            auto pastedCloud = cloudClipboard[i];
+            const float offset = 1.6f * static_cast<float>(i + 1);
+            pastedCloud.position.x += offset;
+            pastedCloud.position.z += offset;
+            environmentSettings.cloudObjects.push_back(pastedCloud);
+            selectedCloudIndices.push_back(static_cast<int>(environmentSettings.cloudObjects.size()) - 1);
+            pastedClouds = true;
+        }
+
+        if (pastedClouds) {
+            importedModelSelected = false;
+            environmentSettings.enableCloudObjects = true;
+            renderer.setEnvironmentSettings(environmentSettings);
+        } else if (pastedImported) {
+            importedModelSelected = true;
+        }
+    };
+
+    const bool allowCloudHotkeys = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !io.WantTextInput;
+    const bool hasHierarchySelection = (importedModelSelected && importedModel.has_value()) || !selectedCloudIndices.empty();
+    const bool hasClipboard = importedModelClipboard.has_value() || !cloudClipboard.empty();
+    if (allowCloudHotkeys && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false) && hasHierarchySelection) {
+        copySelectedObjects();
+    }
+    if (allowCloudHotkeys && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false) && hasClipboard) {
+        pasteObjects();
+    }
 
     ImGui::BeginChild("HierarchyPane", ImVec2(0.0f, hierarchyHeight), true);
     ImGui::TextUnformatted("Hierarchy");
@@ -1083,10 +1349,49 @@ void drawRightPane(
     if (importedModel.has_value()) {
         if (ImGui::Selectable("Imported FBX", importedModelSelected)) {
             importedModelSelected = true;
+            selectedCloudIndices.clear();
         }
     } else {
         ImGui::TextDisabled("No imported model");
     }
+
+    for (int cloudIndex = 0; cloudIndex < static_cast<int>(environmentSettings.cloudObjects.size()); ++cloudIndex) {
+        char cloudLabel[48] = {};
+        std::snprintf(cloudLabel, sizeof(cloudLabel), "Cloud %d", cloudIndex + 1);
+        const bool cloudSelected = std::find(selectedCloudIndices.begin(), selectedCloudIndices.end(), cloudIndex) != selectedCloudIndices.end();
+        if (ImGui::Selectable(cloudLabel, cloudSelected)) {
+            if (io.KeyCtrl) {
+                const auto it = std::find(selectedCloudIndices.begin(), selectedCloudIndices.end(), cloudIndex);
+                if (it != selectedCloudIndices.end()) {
+                    selectedCloudIndices.erase(it);
+                } else {
+                    selectedCloudIndices.push_back(cloudIndex);
+                    importedModelSelected = false;
+                }
+            } else {
+                selectedCloudIndices = {cloudIndex};
+                importedModelSelected = false;
+            }
+        }
+    }
+
+    if (environmentSettings.cloudObjects.empty()) {
+        ImGui::TextDisabled("No cloud objects");
+    }
+
+    ImGui::Spacing();
+    ImGui::BeginDisabled(!hasHierarchySelection);
+    if (ImGui::Button("Copy")) {
+        copySelectedObjects();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!hasClipboard);
+    if (ImGui::Button("Paste")) {
+        pasteObjects();
+    }
+    ImGui::EndDisabled();
+
     ImGui::EndChild();
 
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.20f, 0.22f, 1.0f));
@@ -1106,15 +1411,160 @@ void drawRightPane(
         ImGui::TextUnformatted("Imported FBX");
         ImGui::Separator();
         bool transformChanged = false;
+        bool materialChanged = false;
         transformChanged |= ImGui::DragFloat3("Position", &importedModel->position.x, 0.01f, -1000.0f, 1000.0f);
         transformChanged |= ImGui::DragFloat3("Rotation", &importedModel->rotationEulerDegrees.x, 0.5f, -360.0f, 360.0f);
         transformChanged |= ImGui::DragFloat3("Scale", &importedModel->scale.x, 0.01f, 0.001f, 1000.0f, "%.3f");
         ImGui::Text("Dimensions: %s", formatVec3(importedModelWorldDimensions(*importedModel)).c_str());
+        ImGui::Separator();
+
+        int shaderMode = importedModel->unlitShading ? 1 : 0;
+        if (ImGui::Combo("Shader", &shaderMode, "Lit\0Unlit\0")) {
+            importedModel->unlitShading = (shaderMode == 1);
+            materialChanged = true;
+        }
+
+        materialChanged |= ImGui::SliderFloat("Opacity", &importedModel->opacity, 0.0f, 1.0f, "%.2f");
+        materialChanged |= ImGui::SliderFloat("Alpha Cutoff", &importedModel->alphaCutoff, 0.0f, 1.0f, "%.3f");
+        materialChanged |= ImGui::Checkbox("Alpha Blend", &importedModel->alphaBlend);
+        materialChanged |= ImGui::ColorEdit4("Diffuse", &importedModel->diffuseColor.x);
+        materialChanged |= ImGui::ColorEdit3("Emissive", &importedModel->emissiveColor.x);
+
         if (transformChanged) {
             renderer.setImportedModelTransform(importedModel->position, importedModel->rotationEulerDegrees, importedModel->scale);
         }
+        if (materialChanged) {
+            importedModel->opacity = std::clamp(importedModel->opacity, 0.0f, 1.0f);
+            importedModel->alphaCutoff = std::clamp(importedModel->alphaCutoff, 0.0f, 1.0f);
+            renderer.setImportedModel(*importedModel);
+        }
+    } else if (selectedCloudIndices.size() == 1 &&
+               selectedCloudIndices[0] >= 0 &&
+               selectedCloudIndices[0] < static_cast<int>(environmentSettings.cloudObjects.size())) {
+        const int selectedCloudIndex = selectedCloudIndices[0];
+        auto& cloud = environmentSettings.cloudObjects[selectedCloudIndex];
+        bool cloudChanged = false;
+
+        char cloudLabel[48] = {};
+        std::snprintf(cloudLabel, sizeof(cloudLabel), "Cloud %d", selectedCloudIndex + 1);
+        ImGui::TextUnformatted(cloudLabel);
+        ImGui::Separator();
+
+        cloudChanged |= ImGui::Checkbox("Visible", &cloud.enabled);
+        cloudChanged |= ImGui::DragFloat3("Position", &cloud.position.x, 0.05f, -200.0f, 200.0f, "%.2f");
+        cloudChanged |= ImGui::DragFloat3("Rotation", &cloud.rotationEulerDegrees.x, 0.5f, -180.0f, 180.0f, "%.1f deg");
+        cloudChanged |= ImGui::DragFloat3("Scale", &cloud.scale.x, 0.03f, 0.05f, 20.0f, "%.2f");
+        cloudChanged |= ImGui::ColorEdit3("Cloud Color", &cloud.color.x);
+        cloudChanged |= ImGui::SliderFloat("Opacity", &cloud.opacity, 0.0f, 1.0f, "%.2f");
+        cloudChanged |= ImGui::SliderFloat("Softness", &cloud.softness, 0.2f, 0.98f, "%.2f");
+        cloudChanged |= ImGui::SliderFloat("Detail", &cloud.detail, 0.3f, 4.5f, "%.2f");
+        cloudChanged |= ImGui::SliderFloat("Motion Speed", &cloud.motionSpeed, 0.0f, 8.0f, "%.2f");
+        cloudChanged |= ImGui::SliderFloat("Glow", &cloud.glowStrength, 0.0f, 1.0f, "%.2f");
+        cloudChanged |= ImGui::SliderFloat("Plane Fade", &cloud.planeFade, 0.0f, 1.0f, "%.2f");
+        cloudChanged |= ImGui::SliderInt("Plane Count", &cloud.planeCount, 1, 28);
+        cloudChanged |= ImGui::SliderFloat("Cube Spread", &cloud.cubeSpread, 0.35f, 2.50f, "%.2f");
+
+        if (cloudChanged) {
+            renderer.setEnvironmentSettings(environmentSettings);
+        }
+    } else if (selectedCloudIndices.size() > 1) {
+        // Multi-cloud selection — use first selected cloud as shared reference
+        int firstValid = -1;
+        for (const int idx : selectedCloudIndices) {
+            if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                firstValid = idx;
+                break;
+            }
+        }
+        if (firstValid >= 0) {
+            char multiLabel[48] = {};
+            std::snprintf(multiLabel, sizeof(multiLabel), "%d Clouds Selected", static_cast<int>(selectedCloudIndices.size()));
+            ImGui::TextUnformatted(multiLabel);
+            ImGui::Separator();
+
+            auto& refCloud = environmentSettings.cloudObjects[firstValid];
+            bool cloudChanged = false;
+
+            // Appearance controls apply to all selected clouds
+            if (ImGui::ColorEdit3("Cloud Color", &refCloud.color.x)) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        environmentSettings.cloudObjects[idx].color = refCloud.color;
+                    }
+                }
+                cloudChanged = true;
+            }
+            if (ImGui::SliderFloat("Opacity", &refCloud.opacity, 0.0f, 1.0f, "%.2f")) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        environmentSettings.cloudObjects[idx].opacity = refCloud.opacity;
+                    }
+                }
+                cloudChanged = true;
+            }
+            if (ImGui::SliderFloat("Softness", &refCloud.softness, 0.2f, 0.98f, "%.2f")) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        environmentSettings.cloudObjects[idx].softness = refCloud.softness;
+                    }
+                }
+                cloudChanged = true;
+            }
+            if (ImGui::SliderFloat("Detail", &refCloud.detail, 0.3f, 4.5f, "%.2f")) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        environmentSettings.cloudObjects[idx].detail = refCloud.detail;
+                    }
+                }
+                cloudChanged = true;
+            }
+            if (ImGui::SliderFloat("Motion Speed", &refCloud.motionSpeed, 0.0f, 8.0f, "%.2f")) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        environmentSettings.cloudObjects[idx].motionSpeed = refCloud.motionSpeed;
+                    }
+                }
+                cloudChanged = true;
+            }
+            if (ImGui::SliderFloat("Glow", &refCloud.glowStrength, 0.0f, 1.0f, "%.2f")) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        environmentSettings.cloudObjects[idx].glowStrength = refCloud.glowStrength;
+                    }
+                }
+                cloudChanged = true;
+            }
+            if (ImGui::SliderFloat("Plane Fade", &refCloud.planeFade, 0.0f, 1.0f, "%.2f")) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        environmentSettings.cloudObjects[idx].planeFade = refCloud.planeFade;
+                    }
+                }
+                cloudChanged = true;
+            }
+            if (ImGui::SliderInt("Plane Count", &refCloud.planeCount, 1, 28)) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        environmentSettings.cloudObjects[idx].planeCount = refCloud.planeCount;
+                    }
+                }
+                cloudChanged = true;
+            }
+            if (ImGui::SliderFloat("Cube Spread", &refCloud.cubeSpread, 0.35f, 2.50f, "%.2f")) {
+                for (const int idx : selectedCloudIndices) {
+                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                        environmentSettings.cloudObjects[idx].cubeSpread = refCloud.cubeSpread;
+                    }
+                }
+                cloudChanged = true;
+            }
+
+            if (cloudChanged) {
+                renderer.setEnvironmentSettings(environmentSettings);
+            }
+        }
     } else {
-        ImGui::TextDisabled("Select an imported FBX to edit properties.");
+        ImGui::TextDisabled("Select an imported FBX or cloud to edit properties.");
     }
     ImGui::EndChild();
     ImGui::EndChild();

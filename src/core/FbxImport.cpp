@@ -199,6 +199,8 @@ std::optional<render::ImportedModelData> loadFbxModel(
     model.textureRgba = {255, 255, 255, 255};
     model.opacity = 1.0f;
     model.alphaBlend = false;
+    model.alphaCutoff = 0.01f;
+    model.unlitShading = false;
 
     if (scene->HasMaterials() && mesh->mMaterialIndex < scene->mNumMaterials) {
         const aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
@@ -210,6 +212,11 @@ std::optional<render::ImportedModelData> loadFbxModel(
         aiBlendMode blendMode = aiBlendMode_Default;
         if (material->Get(AI_MATKEY_BLEND_FUNC, blendMode) == AI_SUCCESS && blendMode != aiBlendMode_Default) {
             model.alphaBlend = true;
+        }
+
+        int shadingModel = 0;
+        if (material->Get(AI_MATKEY_SHADING_MODEL, shadingModel) == AI_SUCCESS && shadingModel == aiShadingMode_NoShading) {
+            model.unlitShading = true;
         }
 
         aiColor4D diffuse(1.0f, 1.0f, 1.0f, 1.0f);

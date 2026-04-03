@@ -109,8 +109,10 @@ add_executable(SparksEngine
   src/core/ApplicationUi.cpp
   src/core/ApplicationImport.cpp
   src/core/FbxImport.cpp
+  src/core/WeatherSystem.cpp
   src/core/Rigging.cpp
   src/render/Renderer.cpp
+  src/render/WeatherRenderer.cpp
   src/ui/PropertyPanel.cpp
 )
 
