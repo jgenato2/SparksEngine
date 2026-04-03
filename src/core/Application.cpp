@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #define GLM_ENABLE_EXPERIMENTAL
@@ -31,6 +32,7 @@
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 
+#include "sparks/core/Rigging.hpp"
 #include "sparks/render/Renderer.hpp"
 
 namespace {
@@ -39,41 +41,15 @@ constexpr float kMinCameraZoom = 1.5f;
 constexpr float kMaxCameraZoom = 250.0f;
 constexpr float kCameraFarPlane = 1000.0f;
 
-struct RigBone {
-    std::string name;
-    int parentIndex{-1};
-    glm::vec3 localPosition{0.0f, 0.0f, 0.0f};
-    glm::vec3 localRotationDegrees{0.0f, 0.0f, 0.0f};
-    float length{0.1f};
-};
+glm::vec3 eulerDegreesFromQuatXYZ(const glm::quat& q);
 
-std::vector<RigBone> createDefaultTPoseRig() {
-    return {
-        {"Pelvis", -1, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.12f},
-        {"Spine", 0, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.18f},
-        {"Chest", 1, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.16f},
-        {"Neck", 2, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.08f},
-        {"Head", 3, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.12f},
-
-        {"Clavicle_L", 2, glm::vec3(-0.10f, 0.02f, 0.0f), glm::vec3(0.0f, 0.0f, 90.0f), 0.08f},
-        {"UpperArm_L", 5, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.19f},
-        {"LowerArm_L", 6, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.18f},
-        {"Hand_L", 7, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.08f},
-
-        {"Clavicle_R", 2, glm::vec3(0.10f, 0.02f, 0.0f), glm::vec3(0.0f, 0.0f, -90.0f), 0.08f},
-        {"UpperArm_R", 9, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.19f},
-        {"LowerArm_R", 10, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.18f},
-        {"Hand_R", 11, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.08f},
-
-        {"UpperLeg_L", 0, glm::vec3(-0.07f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 180.0f), 0.24f},
-        {"LowerLeg_L", 13, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.22f},
-        {"Foot_L", 14, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-90.0f, 0.0f, 0.0f), 0.12f},
-
-        {"UpperLeg_R", 0, glm::vec3(0.07f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 180.0f), 0.24f},
-        {"LowerLeg_R", 16, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f), 0.22f},
-        {"Foot_R", 17, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-90.0f, 0.0f, 0.0f), 0.12f},
-    };
-}
+using sparks::core::rigging::RigBone;
+using sparks::core::rigging::VertexGroupInfo;
+using sparks::core::rigging::applyDefaultHumanoidMapping;
+using sparks::core::rigging::enforceHumanoidTPose;
+using sparks::core::rigging::extractRigBonesFromScene;
+using sparks::core::rigging::extractVertexGroupsFromScene;
+constexpr auto& kHumanoidSlotNames = sparks::core::rigging::kHumanoidSlotNames;
 
 std::string formatVec3(const glm::vec3& value) {
     char buffer[96];
@@ -188,7 +164,11 @@ bool findMeshGlobalTransform(const aiNode* currentNode, const aiNode* targetNode
     return false;
 }
 
-std::optional<sparks::render::ImportedModelData> loadFbxModel(const std::string& filePath, std::string& errorMessage) {
+std::optional<sparks::render::ImportedModelData> loadFbxModel(
+    const std::string& filePath,
+    std::string& errorMessage,
+    std::vector<RigBone>* importedRigBones,
+    std::vector<VertexGroupInfo>* importedVertexGroups) {
     Assimp::Importer importer;
     importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
     const aiScene* scene = importer.ReadFile(
@@ -201,6 +181,13 @@ std::optional<sparks::render::ImportedModelData> loadFbxModel(const std::string&
     if (scene == nullptr || !scene->HasMeshes()) {
         errorMessage = importer.GetErrorString();
         return std::nullopt;
+    }
+
+    if (importedRigBones != nullptr) {
+        *importedRigBones = extractRigBonesFromScene(scene, readFbxUnitScale(scene));
+    }
+    if (importedVertexGroups != nullptr) {
+        *importedVertexGroups = extractVertexGroupsFromScene(scene);
     }
 
     const aiMesh* mesh = scene->mMeshes[0];
@@ -403,8 +390,18 @@ int Application::run() {
     std::optional<sparks::render::ImportedModelData> importedModel;
     std::optional<sparks::render::ImportedModelData> transformDragStartImportedModel;
     bool importedModelSelected = false;
-    std::vector<RigBone> rigBones = createDefaultTPoseRig();
+    std::vector<RigBone> rigBones;
+    std::vector<RigBone> rigImportedSourceBones;
+    std::vector<VertexGroupInfo> rigVertexGroups;
+    int selectedVertexGroup = -1;
     int selectedRigBone = 0;
+    int rigAvatarDefinition = 0;
+    int rigAnimationType = 0;
+    bool rigOptimizeGameObjects = false;
+    bool rigHasUnsavedChanges = false;
+    int rigRootBone = 0;
+    std::array<int, 15> humanoidBoneMap{};
+    humanoidBoneMap.fill(-1);
 
     renderer.initialize();
 
@@ -461,10 +458,22 @@ int Application::run() {
 
                         if (selectedPath != nullptr) {
                             std::string error;
-                            const auto imported = loadFbxModel(selectedPath, error);
+                            std::vector<RigBone> importedRigBones;
+                            std::vector<VertexGroupInfo> importedVertexGroups;
+                            const auto imported = loadFbxModel(selectedPath, error, &importedRigBones, &importedVertexGroups);
                             if (imported.has_value()) {
                                 importedModel = *imported;
                                 importedModelSelected = true;
+                                if (!importedRigBones.empty()) {
+                                    rigImportedSourceBones = importedRigBones;
+                                    rigBones = importedRigBones;
+                                    selectedRigBone = 0;
+                                    rigRootBone = 0;
+                                    humanoidBoneMap.fill(-1);
+                                    rigHasUnsavedChanges = false;
+                                }
+                                rigVertexGroups = importedVertexGroups;
+                                selectedVertexGroup = rigVertexGroups.empty() ? -1 : 0;
                                 renderer.setImportedModel(*importedModel);
                                 viewControls.panOffset = glm::vec2(importedModel->position.x, importedModel->position.y);
                                 viewControls.zoomDistance = importedModelFocusZoom(*importedModel);
@@ -473,7 +482,8 @@ int Application::run() {
                                     + " | Pos " + formatVec3(importedModel->position)
                                     + " | Rot " + formatVec3(importedModel->rotationEulerDegrees)
                                     + " | Scale " + formatVec3(importedModel->scale)
-                                    + " | Dim " + formatVec3(importedModelWorldDimensions(*importedModel));
+                                    + " | Dim " + formatVec3(importedModelWorldDimensions(*importedModel))
+                                    + " | Bones " + std::to_string(importedRigBones.size());
                             } else {
                                 importStatus = std::string("FBX import failed: ") + error;
                             }
@@ -1144,39 +1154,164 @@ int Application::run() {
                 }
 
                 if (ImGui::BeginTabItem("Rigging")) {
-                    ImGui::TextUnformatted("T-Pose Character Rig");
+                    ImGui::TextUnformatted("Rig Import Settings");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(Humanoid)");
                     ImGui::Separator();
-                    ImGui::TextWrapped("Template humanoid rig for T-pose setup. Edit bone offsets/rotations and lengths, then use symmetry for left-right limbs.");
 
-                    if (ImGui::Button("Reset T-Pose Template")) {
-                        rigBones = createDefaultTPoseRig();
-                        selectedRigBone = 0;
+                    if (ImGui::Button("Apply")) {
+                        rigHasUnsavedChanges = false;
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button("Mirror Left -> Right")) {
-                        for (std::size_t i = 0; i < rigBones.size(); ++i) {
-                            const std::string& name = rigBones[i].name;
-                            if (name.size() > 2 && endsWith(name, "_L")) {
-                                std::string rightName = name.substr(0, name.size() - 2) + "_R";
-                                for (std::size_t j = 0; j < rigBones.size(); ++j) {
-                                    if (rigBones[j].name == rightName) {
-                                        rigBones[j].localPosition = rigBones[i].localPosition;
-                                        rigBones[j].localPosition.x = -rigBones[j].localPosition.x;
-                                        rigBones[j].localRotationDegrees = rigBones[i].localRotationDegrees;
-                                        rigBones[j].localRotationDegrees.y = -rigBones[j].localRotationDegrees.y;
-                                        rigBones[j].localRotationDegrees.z = -rigBones[j].localRotationDegrees.z;
-                                        rigBones[j].length = rigBones[i].length;
-                                        break;
-                                    }
+                    if (ImGui::Button("Revert")) {
+                        rigBones = rigImportedSourceBones;
+                        selectedRigBone = 0;
+                        humanoidBoneMap.fill(-1);
+                        rigHasUnsavedChanges = false;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(rigHasUnsavedChanges ? "Status: Modified" : "Status: Up to date");
+
+                    const char* avatarDefOptions[] = {"Create From This Model", "Copy From Other Avatar"};
+                    const char* animTypeOptions[] = {"Humanoid", "Generic", "Legacy"};
+
+                    if (ImGui::CollapsingHeader("Avatar Definition & Rig Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::BeginChild("RigConfig", ImVec2(0.0f, 140.0f), true);
+                    if (ImGui::Combo("Animation Type", &rigAnimationType, animTypeOptions, IM_ARRAYSIZE(animTypeOptions))) {
+                        rigHasUnsavedChanges = true;
+                    }
+                    if (ImGui::Combo("Avatar Definition", &rigAvatarDefinition, avatarDefOptions, IM_ARRAYSIZE(avatarDefOptions))) {
+                        rigHasUnsavedChanges = true;
+                    }
+                    if (ImGui::Checkbox("Optimize Game Objects", &rigOptimizeGameObjects)) {
+                        rigHasUnsavedChanges = true;
+                    }
+                    if (!rigBones.empty()) {
+                        rigRootBone = std::clamp(rigRootBone, 0, static_cast<int>(rigBones.size()) - 1);
+                        if (ImGui::BeginCombo("Root Node", rigBones[static_cast<std::size_t>(rigRootBone)].name.c_str())) {
+                            for (int i = 0; i < static_cast<int>(rigBones.size()); ++i) {
+                                const bool selected = (rigRootBone == i);
+                                if (ImGui::Selectable(rigBones[static_cast<std::size_t>(i)].name.c_str(), selected)) {
+                                    rigRootBone = i;
+                                    rigHasUnsavedChanges = true;
+                                }
+                                if (selected) {
+                                    ImGui::SetItemDefaultFocus();
                                 }
                             }
+                            ImGui::EndCombo();
+                        }
+                    }
+                    ImGui::EndChild();
+                    }
+
+                    if (ImGui::CollapsingHeader("Configure Avatar", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::BeginChild("HumanoidMapping", ImVec2(0.0f, 260.0f), true);
+                    ImGui::TextUnformatted("Humanoid Bone Mapping");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(Required + Optional)");
+                    ImGui::Separator();
+
+                    if (ImGui::Button("Auto-map")) {
+                        applyDefaultHumanoidMapping(humanoidBoneMap, rigBones);
+                        rigHasUnsavedChanges = true;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Enforce T-Pose")) {
+                        enforceHumanoidTPose(rigBones);
+                        rigHasUnsavedChanges = true;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Reset")) {
+                        rigBones = rigImportedSourceBones;
+                        selectedRigBone = 0;
+                        rigRootBone = 0;
+                        humanoidBoneMap.fill(-1);
+                        rigHasUnsavedChanges = true;
+                    }
+
+                    for (int slot = 0; slot < static_cast<int>(kHumanoidSlotNames.size()); ++slot) {
+                        const int mapped = humanoidBoneMap[static_cast<std::size_t>(slot)];
+                        const bool mappedOk = mapped >= 0 && mapped < static_cast<int>(rigBones.size());
+                        ImGui::PushStyleColor(ImGuiCol_Text, mappedOk ? IM_COL32(132, 220, 132, 255) : IM_COL32(255, 170, 120, 255));
+                        ImGui::Text("%s", kHumanoidSlotNames[static_cast<std::size_t>(slot)]);
+                        ImGui::PopStyleColor();
+                        ImGui::SameLine(190.0f);
+
+                        std::string comboId = std::string("##HumanoidMap") + std::to_string(slot);
+                        const char* previewName = mappedOk ? rigBones[static_cast<std::size_t>(mapped)].name.c_str() : "<None>";
+                        if (ImGui::BeginCombo(comboId.c_str(), previewName)) {
+                            const bool noneSelected = mapped == -1;
+                            if (ImGui::Selectable("<None>", noneSelected)) {
+                                humanoidBoneMap[static_cast<std::size_t>(slot)] = -1;
+                                rigHasUnsavedChanges = true;
+                            }
+                            if (noneSelected) {
+                                ImGui::SetItemDefaultFocus();
+                            }
+
+                            for (int i = 0; i < static_cast<int>(rigBones.size()); ++i) {
+                                const bool selected = mapped == i;
+                                if (ImGui::Selectable(rigBones[static_cast<std::size_t>(i)].name.c_str(), selected)) {
+                                    humanoidBoneMap[static_cast<std::size_t>(slot)] = i;
+                                    rigHasUnsavedChanges = true;
+                                }
+                                if (selected) {
+                                    ImGui::SetItemDefaultFocus();
+                                }
+                            }
+                            ImGui::EndCombo();
                         }
                     }
 
-                    const float rigEditorHeight = std::max(200.0f, ImGui::GetContentRegionAvail().y * 0.52f);
+                    ImGui::EndChild();
+                    }
+
+                    if (ImGui::CollapsingHeader("Skin Weights / Vertex Groups", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    const float weightsPanelHeight = std::max(140.0f, ImGui::GetContentRegionAvail().y * 0.25f);
+                    ImGui::BeginChild("VertexGroups", ImVec2(0.0f, weightsPanelHeight), true);
+                    ImGui::Text("Imported Groups: %d", static_cast<int>(rigVertexGroups.size()));
+                    ImGui::Separator();
+
+                    if (rigVertexGroups.empty()) {
+                        ImGui::TextDisabled("No FBX vertex groups found in current import.");
+                    } else {
+                        selectedVertexGroup = std::clamp(selectedVertexGroup, 0, static_cast<int>(rigVertexGroups.size()) - 1);
+
+                        ImGui::BeginChild("VertexGroupList", ImVec2(280.0f, 0.0f), true);
+                        for (int i = 0; i < static_cast<int>(rigVertexGroups.size()); ++i) {
+                            const VertexGroupInfo& g = rigVertexGroups[static_cast<std::size_t>(i)];
+                            char label[256];
+                            std::snprintf(label, sizeof(label), "%s (%d)", g.name.c_str(), g.weightedVertexCount);
+                            if (ImGui::Selectable(label, selectedVertexGroup == i)) {
+                                selectedVertexGroup = i;
+                            }
+                        }
+                        ImGui::EndChild();
+
+                        ImGui::SameLine();
+
+                        ImGui::BeginChild("VertexGroupDetails", ImVec2(0.0f, 0.0f), true);
+                        const VertexGroupInfo& g = rigVertexGroups[static_cast<std::size_t>(selectedVertexGroup)];
+                        ImGui::Text("Group: %s", g.name.c_str());
+                        ImGui::Separator();
+                        ImGui::Text("Weighted Vertices: %d", g.weightedVertexCount);
+                        ImGui::Text("Total Weight: %.4f", g.totalWeight);
+                        ImGui::Text("Max Weight: %.4f", g.maxWeight);
+                        if (g.weightedVertexCount > 0) {
+                            ImGui::Text("Average Weight: %.4f", g.totalWeight / static_cast<float>(g.weightedVertexCount));
+                        }
+                        ImGui::EndChild();
+                    }
+
+                    ImGui::EndChild();
+                    }
+
+                    if (ImGui::CollapsingHeader("Muscles & Bone Inspector", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    const float rigEditorHeight = std::max(180.0f, ImGui::GetContentRegionAvail().y * 0.36f);
                     ImGui::BeginChild("RigEditor", ImVec2(0.0f, rigEditorHeight), true);
                     ImGui::BeginChild("RigHierarchy", ImVec2(220.0f, 0.0f), true);
-                    ImGui::TextUnformatted("Bones");
+                    ImGui::TextUnformatted("Bone Hierarchy");
                     ImGui::Separator();
                     for (int i = 0; i < static_cast<int>(rigBones.size()); ++i) {
                         const bool isSelected = (selectedRigBone == i);
@@ -1187,16 +1322,21 @@ int Application::run() {
                     ImGui::EndChild();
 
                     ImGui::SameLine();
-
                     ImGui::BeginChild("RigProperties", ImVec2(0.0f, 0.0f), true);
                     if (!rigBones.empty()) {
                         selectedRigBone = std::clamp(selectedRigBone, 0, static_cast<int>(rigBones.size()) - 1);
                         RigBone& bone = rigBones[static_cast<std::size_t>(selectedRigBone)];
-                        ImGui::Text("Selected: %s", bone.name.c_str());
+                        ImGui::Text("Bone Inspector: %s", bone.name.c_str());
                         ImGui::Separator();
-                        ImGui::DragFloat3("Local Position", &bone.localPosition.x, 0.005f, -1.0f, 1.0f, "%.3f");
-                        ImGui::DragFloat3("Local Rotation", &bone.localRotationDegrees.x, 0.5f, -180.0f, 180.0f, "%.1f deg");
-                        ImGui::DragFloat("Bone Length", &bone.length, 0.002f, 0.01f, 0.8f, "%.3f");
+                        if (ImGui::DragFloat3("Local Position", &bone.localPosition.x, 0.005f, -1.0f, 1.0f, "%.3f")) {
+                            rigHasUnsavedChanges = true;
+                        }
+                        if (ImGui::DragFloat3("Local Rotation", &bone.localRotationDegrees.x, 0.5f, -180.0f, 180.0f, "%.1f deg")) {
+                            rigHasUnsavedChanges = true;
+                        }
+                        if (ImGui::DragFloat("Bone Length", &bone.length, 0.002f, 0.01f, 0.8f, "%.3f")) {
+                            rigHasUnsavedChanges = true;
+                        }
                         if (bone.parentIndex >= 0 && bone.parentIndex < static_cast<int>(rigBones.size())) {
                             ImGui::Text("Parent: %s", rigBones[static_cast<std::size_t>(bone.parentIndex)].name.c_str());
                         } else {
@@ -1205,7 +1345,9 @@ int Application::run() {
                     }
                     ImGui::EndChild();
                     ImGui::EndChild();
+                    }
 
+                    if (ImGui::CollapsingHeader("T-Pose Preview", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::BeginChild("RigPreview", ImVec2(0.0f, 0.0f), true);
                     ImGui::TextUnformatted("T-Pose Preview");
                     ImGui::Separator();
@@ -1239,6 +1381,10 @@ int Application::run() {
                     rigDrawList->AddRect(canvasMin, canvasMax, IM_COL32(62, 70, 84, 255), 0.0f, 0, 1.0f);
 
                     if (!rigBones.empty() && canvasSize.x > 10.0f && canvasSize.y > 10.0f) {
+                        const bool showSelectedImported = importedModelSelected && importedModel.has_value();
+                        glm::vec3 selectedObjCenter(0.0f);
+                        glm::vec3 selectedObjMin(0.0f);
+                        glm::vec3 selectedObjMax(0.0f);
                         float minX = std::numeric_limits<float>::max();
                         float minY = std::numeric_limits<float>::max();
                         float maxX = std::numeric_limits<float>::lowest();
@@ -1249,6 +1395,18 @@ int Application::run() {
                             minY = std::min(minY, std::min(boneStarts[i].y, boneEnds[i].y));
                             maxX = std::max(maxX, std::max(boneStarts[i].x, boneEnds[i].x));
                             maxY = std::max(maxY, std::max(boneStarts[i].y, boneEnds[i].y));
+                        }
+
+                        if (showSelectedImported) {
+                            const glm::vec3 halfExtent = importedModelWorldDimensions(*importedModel) * 0.5f;
+                            const int clampedBoneIndex = std::clamp(selectedRigBone, 0, static_cast<int>(boneEnds.size()) - 1);
+                            selectedObjCenter = boneEnds[static_cast<std::size_t>(clampedBoneIndex)];
+                            selectedObjMin = selectedObjCenter - halfExtent;
+                            selectedObjMax = selectedObjCenter + halfExtent;
+                            minX = std::min(minX, selectedObjMin.x);
+                            minY = std::min(minY, selectedObjMin.y);
+                            maxX = std::max(maxX, selectedObjMax.x);
+                            maxY = std::max(maxY, selectedObjMax.y);
                         }
 
                         const float width = std::max(0.001f, maxX - minX);
@@ -1263,6 +1421,41 @@ int Application::run() {
                             const float ny = (p.y - minY) * scale + pad;
                             return ImVec2(canvasMin.x + nx, canvasMax.y - ny);
                         };
+
+                        if (showSelectedImported) {
+                            const ImVec2 objMin = toCanvas(glm::vec3(selectedObjMin.x, selectedObjMax.y, 0.0f));
+                            const ImVec2 objMax = toCanvas(glm::vec3(selectedObjMax.x, selectedObjMin.y, 0.0f));
+                            rigDrawList->AddRectFilled(objMin, objMax, IM_COL32(250, 220, 100, 28));
+                            rigDrawList->AddRect(objMin, objMax, IM_COL32(250, 220, 100, 220), 0.0f, 0, 1.5f);
+                            const int clampedBoneIndex = std::clamp(selectedRigBone, 0, static_cast<int>(rigBones.size()) - 1);
+                            std::string attachLabel = std::string("Selected FBX @ ") + rigBones[static_cast<std::size_t>(clampedBoneIndex)].name;
+                            rigDrawList->AddText(ImVec2(objMin.x + 6.0f, objMin.y + 4.0f), IM_COL32(255, 236, 160, 255), attachLabel.c_str());
+
+                            // Draw front direction marker from current model rotation so the preview shows the object's front.
+                            const glm::quat modelRotation = composeRotationXYZDegrees(importedModel->rotationEulerDegrees);
+                            const glm::vec3 worldForward = modelRotation * glm::vec3(0.0f, 0.0f, -1.0f);
+                            glm::vec2 front2D(worldForward.x, worldForward.y);
+                            float frontLen = std::sqrt(front2D.x * front2D.x + front2D.y * front2D.y);
+                            if (frontLen < 0.0001f) {
+                                front2D = glm::vec2(0.0f, 1.0f);
+                                frontLen = 1.0f;
+                            }
+                            front2D /= frontLen;
+
+                            const ImVec2 center((objMin.x + objMax.x) * 0.5f, (objMin.y + objMax.y) * 0.5f);
+                            const float markerLen = std::max(14.0f, std::min(objMax.x - objMin.x, objMax.y - objMin.y) * 0.35f);
+                            const ImVec2 frontTip(center.x + front2D.x * markerLen, center.y - front2D.y * markerLen);
+                            rigDrawList->AddLine(center, frontTip, IM_COL32(255, 140, 70, 255), 2.5f);
+
+                            const ImVec2 dir((frontTip.x - center.x) / markerLen, (frontTip.y - center.y) / markerLen);
+                            const ImVec2 normal(-dir.y, dir.x);
+                            const float arrowLen = 9.0f;
+                            const float arrowWidth = 4.5f;
+                            const ImVec2 p1(frontTip.x - dir.x * arrowLen + normal.x * arrowWidth, frontTip.y - dir.y * arrowLen + normal.y * arrowWidth);
+                            const ImVec2 p2(frontTip.x - dir.x * arrowLen - normal.x * arrowWidth, frontTip.y - dir.y * arrowLen - normal.y * arrowWidth);
+                            rigDrawList->AddTriangleFilled(frontTip, p1, p2, IM_COL32(255, 140, 70, 255));
+                            rigDrawList->AddText(ImVec2(frontTip.x + 6.0f, frontTip.y - 10.0f), IM_COL32(255, 190, 130, 255), "Front");
+                        }
 
                         for (std::size_t i = 0; i < rigBones.size(); ++i) {
                             const ImVec2 a = toCanvas(boneStarts[i]);
@@ -1288,6 +1481,7 @@ int Application::run() {
 
                     ImGui::Dummy(canvasSize);
                     ImGui::EndChild();
+                    }
 
                     ImGui::EndTabItem();
                 }

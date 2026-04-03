@@ -106,17 +106,25 @@ endif()
 add_executable(SparksEngine
   src/app/main.cpp
   src/core/Application.cpp
+  src/core/Rigging.cpp
   src/render/Renderer.cpp
   src/ui/PropertyPanel.cpp
 )
 
-target_include_directories(SparksEngine PRIVATE include)
-target_include_directories(SparksEngine PRIVATE ${stb_SOURCE_DIR})
+target_include_directories(SparksEngine PRIVATE
+  include
+  ${assimp_SOURCE_DIR}/include
+  ${imgui_SOURCE_DIR}
+  ${imgui_SOURCE_DIR}/backends
+  ${stb_SOURCE_DIR}
+  ${tinyfiledialogs_SOURCE_DIR}
+)
 target_link_libraries(SparksEngine PRIVATE glfw glm::glm glad imgui_lib tinyfiledialogs_lib assimp OpenGL::GL)
 
 if(MSVC)
   set_property(TARGET SparksEngine PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
   target_compile_options(SparksEngine PRIVATE /W4 /permissive-)
+  target_link_options(SparksEngine PRIVATE /NODEFAULTLIB:LIBCMT)
 else()
   target_compile_options(SparksEngine PRIVATE -Wall -Wextra -Wpedantic)
 endif()

@@ -5,10 +5,13 @@
       "name": "Win32",
       "includePath": [
         "${workspaceFolder}/include",
-        "${workspaceFolder}/build/_deps/imgui-src",
-        "${workspaceFolder}/build/_deps/imgui-src/backends",
+        "${workspaceFolder}/build/_deps/assimp-src/include",
         "${workspaceFolder}/build/_deps/glfw-src/include",
         "${workspaceFolder}/build/_deps/glm-src",
+        "${workspaceFolder}/build/_deps/imgui-src",
+        "${workspaceFolder}/build/_deps/imgui-src/backends",
+        "${workspaceFolder}/build/_deps/stb-src",
+        "${workspaceFolder}/build/_deps/tinyfiledialogs-src",
         "${workspaceFolder}/build/gladsources/glad/include"
       ],
       "configurationProvider": "ms-vscode.cmake-tools",
