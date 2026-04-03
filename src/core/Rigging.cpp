@@ -68,20 +68,6 @@ std::string canonicalBoneName(const std::string& name) {
             compact.push_back(static_cast<char>(std::tolower(c)));
         }
     }
-
-    static constexpr std::array<const char*, 3> kKnownPrefixes = {
-        "mixamorig",
-        "betajoints",
-        "betasurface"
-    };
-    for (const char* prefix : kKnownPrefixes) {
-        const std::size_t prefixLength = std::char_traits<char>::length(prefix);
-        if (compact.size() >= prefixLength && compact.compare(0, prefixLength, prefix) == 0) {
-            compact.erase(0, prefixLength);
-            break;
-        }
-    }
-
     return compact;
 }
 
@@ -114,25 +100,25 @@ int findRigBoneByAliases(const std::vector<RigBone>& rigBones, const AliasList a
     return -1;
 }
 
-constexpr std::array<const char*, 5> kHipsAliases = {"Pelvis", "Hips", "mixamorig:Hips", "Beta_Joints:Hips", "Beta_Surface:Hips"};
-constexpr std::array<const char*, 5> kSpineAliases = {"Spine", "Spine1", "mixamorig:Spine", "Beta_Joints:Spine", "Beta_Surface:Spine"};
-constexpr std::array<const char*, 7> kChestAliases = {"Chest", "Spine2", "UpperChest", "mixamorig:Spine1", "mixamorig:Spine2", "Beta_Joints:Spine2", "Beta_Surface:Spine2"};
-constexpr std::array<const char*, 4> kNeckAliases = {"Neck", "mixamorig:Neck", "Beta_Joints:Neck", "Beta_Surface:Neck"};
-constexpr std::array<const char*, 4> kHeadAliases = {"Head", "mixamorig:Head", "Beta_Joints:Head", "Beta_Surface:Head"};
-constexpr std::array<const char*, 7> kUpperArmLAliases = {"UpperArm_L", "LeftArm", "LeftUpperArm", "Arm_L", "mixamorig:LeftArm", "Beta_Joints:LeftArm", "Beta_Surface:LeftArm"};
-constexpr std::array<const char*, 7> kLowerArmLAliases = {"LowerArm_L", "LeftForeArm", "LeftLowerArm", "ForeArm_L", "mixamorig:LeftForeArm", "Beta_Joints:LeftForeArm", "Beta_Surface:LeftForeArm"};
-constexpr std::array<const char*, 5> kHandLAliases = {"Hand_L", "LeftHand", "mixamorig:LeftHand", "Beta_Joints:LeftHand", "Beta_Surface:LeftHand"};
-constexpr std::array<const char*, 7> kUpperArmRAliases = {"UpperArm_R", "RightArm", "RightUpperArm", "Arm_R", "mixamorig:RightArm", "Beta_Joints:RightArm", "Beta_Surface:RightArm"};
-constexpr std::array<const char*, 7> kLowerArmRAliases = {"LowerArm_R", "RightForeArm", "RightLowerArm", "ForeArm_R", "mixamorig:RightForeArm", "Beta_Joints:RightForeArm", "Beta_Surface:RightForeArm"};
-constexpr std::array<const char*, 5> kHandRAliases = {"Hand_R", "RightHand", "mixamorig:RightHand", "Beta_Joints:RightHand", "Beta_Surface:RightHand"};
-constexpr std::array<const char*, 6> kUpperLegLAliases = {"UpperLeg_L", "LeftUpLeg", "LeftThigh", "mixamorig:LeftUpLeg", "Beta_Joints:LeftUpLeg", "Beta_Surface:LeftUpLeg"};
-constexpr std::array<const char*, 6> kLowerLegLAliases = {"LowerLeg_L", "LeftLeg", "LeftCalf", "mixamorig:LeftLeg", "Beta_Joints:LeftLeg", "Beta_Surface:LeftLeg"};
-constexpr std::array<const char*, 6> kUpperLegRAliases = {"UpperLeg_R", "RightUpLeg", "RightThigh", "mixamorig:RightUpLeg", "Beta_Joints:RightUpLeg", "Beta_Surface:RightUpLeg"};
-constexpr std::array<const char*, 6> kLowerLegRAliases = {"LowerLeg_R", "RightLeg", "RightCalf", "mixamorig:RightLeg", "Beta_Joints:RightLeg", "Beta_Surface:RightLeg"};
-constexpr std::array<const char*, 6> kLeftShoulderAliases = {"Clavicle_L", "Shoulder_L", "LeftShoulder", "mixamorig:LeftShoulder", "Beta_Joints:LeftShoulder", "Beta_Surface:LeftShoulder"};
-constexpr std::array<const char*, 6> kRightShoulderAliases = {"Clavicle_R", "Shoulder_R", "RightShoulder", "mixamorig:RightShoulder", "Beta_Joints:RightShoulder", "Beta_Surface:RightShoulder"};
-constexpr std::array<const char*, 5> kLeftFootAliases = {"Foot_L", "LeftFoot", "mixamorig:LeftFoot", "Beta_Joints:LeftFoot", "Beta_Surface:LeftFoot"};
-constexpr std::array<const char*, 5> kRightFootAliases = {"Foot_R", "RightFoot", "mixamorig:RightFoot", "Beta_Joints:RightFoot", "Beta_Surface:RightFoot"};
+constexpr std::array<const char*, 2> kHipsAliases = {"Pelvis", "Hips"};
+constexpr std::array<const char*, 2> kSpineAliases = {"Spine", "Spine1"};
+constexpr std::array<const char*, 3> kChestAliases = {"Chest", "Spine2", "UpperChest"};
+constexpr std::array<const char*, 1> kNeckAliases = {"Neck"};
+constexpr std::array<const char*, 1> kHeadAliases = {"Head"};
+constexpr std::array<const char*, 4> kUpperArmLAliases = {"UpperArm_L", "LeftArm", "LeftUpperArm", "Arm_L"};
+constexpr std::array<const char*, 4> kLowerArmLAliases = {"LowerArm_L", "LeftForeArm", "LeftLowerArm", "ForeArm_L"};
+constexpr std::array<const char*, 2> kHandLAliases = {"Hand_L", "LeftHand"};
+constexpr std::array<const char*, 4> kUpperArmRAliases = {"UpperArm_R", "RightArm", "RightUpperArm", "Arm_R"};
+constexpr std::array<const char*, 4> kLowerArmRAliases = {"LowerArm_R", "RightForeArm", "RightLowerArm", "ForeArm_R"};
+constexpr std::array<const char*, 2> kHandRAliases = {"Hand_R", "RightHand"};
+constexpr std::array<const char*, 3> kUpperLegLAliases = {"UpperLeg_L", "LeftUpLeg", "LeftThigh"};
+constexpr std::array<const char*, 3> kLowerLegLAliases = {"LowerLeg_L", "LeftLeg", "LeftCalf"};
+constexpr std::array<const char*, 3> kUpperLegRAliases = {"UpperLeg_R", "RightUpLeg", "RightThigh"};
+constexpr std::array<const char*, 3> kLowerLegRAliases = {"LowerLeg_R", "RightLeg", "RightCalf"};
+constexpr std::array<const char*, 3> kLeftShoulderAliases = {"Clavicle_L", "Shoulder_L", "LeftShoulder"};
+constexpr std::array<const char*, 3> kRightShoulderAliases = {"Clavicle_R", "Shoulder_R", "RightShoulder"};
+constexpr std::array<const char*, 2> kLeftFootAliases = {"Foot_L", "LeftFoot"};
+constexpr std::array<const char*, 2> kRightFootAliases = {"Foot_R", "RightFoot"};
 
 struct HumanoidMappingRule {
     std::size_t slot;
