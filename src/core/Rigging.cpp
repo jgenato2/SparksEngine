@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -84,11 +85,21 @@ std::string canonicalBoneName(const std::string& name) {
     return compact;
 }
 
-int findRigBoneByAliases(const std::vector<RigBone>& rigBones, std::initializer_list<const char*> aliases) {
+struct AliasList {
+    const char* const* names;
+    std::size_t count;
+};
+
+template <std::size_t N>
+constexpr AliasList makeAliasList(const std::array<const char*, N>& aliases) {
+    return AliasList{aliases.data(), aliases.size()};
+}
+
+int findRigBoneByAliases(const std::vector<RigBone>& rigBones, const AliasList aliases) {
     std::vector<std::string> canonicalAliases;
-    canonicalAliases.reserve(aliases.size());
-    for (const char* alias : aliases) {
-        canonicalAliases.push_back(canonicalBoneName(alias));
+    canonicalAliases.reserve(aliases.count);
+    for (std::size_t i = 0; i < aliases.count; ++i) {
+        canonicalAliases.push_back(canonicalBoneName(aliases.names[i]));
     }
 
     for (int i = 0; i < static_cast<int>(rigBones.size()); ++i) {
@@ -102,6 +113,63 @@ int findRigBoneByAliases(const std::vector<RigBone>& rigBones, std::initializer_
 
     return -1;
 }
+
+constexpr std::array<const char*, 5> kHipsAliases = {"Pelvis", "Hips", "mixamorig:Hips", "Beta_Joints:Hips", "Beta_Surface:Hips"};
+constexpr std::array<const char*, 5> kSpineAliases = {"Spine", "Spine1", "mixamorig:Spine", "Beta_Joints:Spine", "Beta_Surface:Spine"};
+constexpr std::array<const char*, 7> kChestAliases = {"Chest", "Spine2", "UpperChest", "mixamorig:Spine1", "mixamorig:Spine2", "Beta_Joints:Spine2", "Beta_Surface:Spine2"};
+constexpr std::array<const char*, 4> kNeckAliases = {"Neck", "mixamorig:Neck", "Beta_Joints:Neck", "Beta_Surface:Neck"};
+constexpr std::array<const char*, 4> kHeadAliases = {"Head", "mixamorig:Head", "Beta_Joints:Head", "Beta_Surface:Head"};
+constexpr std::array<const char*, 7> kUpperArmLAliases = {"UpperArm_L", "LeftArm", "LeftUpperArm", "Arm_L", "mixamorig:LeftArm", "Beta_Joints:LeftArm", "Beta_Surface:LeftArm"};
+constexpr std::array<const char*, 7> kLowerArmLAliases = {"LowerArm_L", "LeftForeArm", "LeftLowerArm", "ForeArm_L", "mixamorig:LeftForeArm", "Beta_Joints:LeftForeArm", "Beta_Surface:LeftForeArm"};
+constexpr std::array<const char*, 5> kHandLAliases = {"Hand_L", "LeftHand", "mixamorig:LeftHand", "Beta_Joints:LeftHand", "Beta_Surface:LeftHand"};
+constexpr std::array<const char*, 7> kUpperArmRAliases = {"UpperArm_R", "RightArm", "RightUpperArm", "Arm_R", "mixamorig:RightArm", "Beta_Joints:RightArm", "Beta_Surface:RightArm"};
+constexpr std::array<const char*, 7> kLowerArmRAliases = {"LowerArm_R", "RightForeArm", "RightLowerArm", "ForeArm_R", "mixamorig:RightForeArm", "Beta_Joints:RightForeArm", "Beta_Surface:RightForeArm"};
+constexpr std::array<const char*, 5> kHandRAliases = {"Hand_R", "RightHand", "mixamorig:RightHand", "Beta_Joints:RightHand", "Beta_Surface:RightHand"};
+constexpr std::array<const char*, 6> kUpperLegLAliases = {"UpperLeg_L", "LeftUpLeg", "LeftThigh", "mixamorig:LeftUpLeg", "Beta_Joints:LeftUpLeg", "Beta_Surface:LeftUpLeg"};
+constexpr std::array<const char*, 6> kLowerLegLAliases = {"LowerLeg_L", "LeftLeg", "LeftCalf", "mixamorig:LeftLeg", "Beta_Joints:LeftLeg", "Beta_Surface:LeftLeg"};
+constexpr std::array<const char*, 6> kUpperLegRAliases = {"UpperLeg_R", "RightUpLeg", "RightThigh", "mixamorig:RightUpLeg", "Beta_Joints:RightUpLeg", "Beta_Surface:RightUpLeg"};
+constexpr std::array<const char*, 6> kLowerLegRAliases = {"LowerLeg_R", "RightLeg", "RightCalf", "mixamorig:RightLeg", "Beta_Joints:RightLeg", "Beta_Surface:RightLeg"};
+constexpr std::array<const char*, 6> kLeftShoulderAliases = {"Clavicle_L", "Shoulder_L", "LeftShoulder", "mixamorig:LeftShoulder", "Beta_Joints:LeftShoulder", "Beta_Surface:LeftShoulder"};
+constexpr std::array<const char*, 6> kRightShoulderAliases = {"Clavicle_R", "Shoulder_R", "RightShoulder", "mixamorig:RightShoulder", "Beta_Joints:RightShoulder", "Beta_Surface:RightShoulder"};
+constexpr std::array<const char*, 5> kLeftFootAliases = {"Foot_L", "LeftFoot", "mixamorig:LeftFoot", "Beta_Joints:LeftFoot", "Beta_Surface:LeftFoot"};
+constexpr std::array<const char*, 5> kRightFootAliases = {"Foot_R", "RightFoot", "mixamorig:RightFoot", "Beta_Joints:RightFoot", "Beta_Surface:RightFoot"};
+
+struct HumanoidMappingRule {
+    std::size_t slot;
+    AliasList aliases;
+};
+
+constexpr std::array<HumanoidMappingRule, 15> kHumanoidMappingRules = {{
+    {0, makeAliasList(kHipsAliases)},
+    {1, makeAliasList(kSpineAliases)},
+    {2, makeAliasList(kChestAliases)},
+    {3, makeAliasList(kNeckAliases)},
+    {4, makeAliasList(kHeadAliases)},
+    {5, makeAliasList(kUpperArmLAliases)},
+    {6, makeAliasList(kLowerArmLAliases)},
+    {7, makeAliasList(kHandLAliases)},
+    {8, makeAliasList(kUpperArmRAliases)},
+    {9, makeAliasList(kLowerArmRAliases)},
+    {10, makeAliasList(kHandRAliases)},
+    {11, makeAliasList(kUpperLegLAliases)},
+    {12, makeAliasList(kLowerLegLAliases)},
+    {13, makeAliasList(kUpperLegRAliases)},
+    {14, makeAliasList(kLowerLegRAliases)},
+}};
+
+struct TPoseRule {
+    AliasList aliases;
+    glm::vec3 rotationDegrees;
+};
+
+const std::array<TPoseRule, 6> kHumanoidTPoseRules = {{
+    {makeAliasList(kLeftShoulderAliases), glm::vec3(0.0f, 0.0f, 90.0f)},
+    {makeAliasList(kRightShoulderAliases), glm::vec3(0.0f, 0.0f, -90.0f)},
+    {makeAliasList(kUpperLegLAliases), glm::vec3(0.0f, 0.0f, 180.0f)},
+    {makeAliasList(kUpperLegRAliases), glm::vec3(0.0f, 0.0f, 180.0f)},
+    {makeAliasList(kLeftFootAliases), glm::vec3(-90.0f, 0.0f, 0.0f)},
+    {makeAliasList(kRightFootAliases), glm::vec3(-90.0f, 0.0f, 0.0f)},
+}};
 
 }  // namespace
 
@@ -247,21 +315,9 @@ std::vector<VertexGroupInfo> extractVertexGroupsFromScene(const aiScene* scene) 
 }
 
 void applyDefaultHumanoidMapping(std::array<int, 15>& humanoidBoneMap, const std::vector<RigBone>& rigBones) {
-    humanoidBoneMap[0] = findRigBoneByAliases(rigBones, {"Pelvis", "Hips", "mixamorig:Hips", "Beta_Joints:Hips", "Beta_Surface:Hips"});
-    humanoidBoneMap[1] = findRigBoneByAliases(rigBones, {"Spine", "Spine1", "mixamorig:Spine", "Beta_Joints:Spine", "Beta_Surface:Spine"});
-    humanoidBoneMap[2] = findRigBoneByAliases(rigBones, {"Chest", "Spine2", "UpperChest", "mixamorig:Spine1", "mixamorig:Spine2", "Beta_Joints:Spine2", "Beta_Surface:Spine2"});
-    humanoidBoneMap[3] = findRigBoneByAliases(rigBones, {"Neck", "mixamorig:Neck", "Beta_Joints:Neck", "Beta_Surface:Neck"});
-    humanoidBoneMap[4] = findRigBoneByAliases(rigBones, {"Head", "mixamorig:Head", "Beta_Joints:Head", "Beta_Surface:Head"});
-    humanoidBoneMap[5] = findRigBoneByAliases(rigBones, {"UpperArm_L", "LeftArm", "LeftUpperArm", "Arm_L", "mixamorig:LeftArm", "Beta_Joints:LeftArm", "Beta_Surface:LeftArm"});
-    humanoidBoneMap[6] = findRigBoneByAliases(rigBones, {"LowerArm_L", "LeftForeArm", "LeftLowerArm", "ForeArm_L", "mixamorig:LeftForeArm", "Beta_Joints:LeftForeArm", "Beta_Surface:LeftForeArm"});
-    humanoidBoneMap[7] = findRigBoneByAliases(rigBones, {"Hand_L", "LeftHand", "mixamorig:LeftHand", "Beta_Joints:LeftHand", "Beta_Surface:LeftHand"});
-    humanoidBoneMap[8] = findRigBoneByAliases(rigBones, {"UpperArm_R", "RightArm", "RightUpperArm", "Arm_R", "mixamorig:RightArm", "Beta_Joints:RightArm", "Beta_Surface:RightArm"});
-    humanoidBoneMap[9] = findRigBoneByAliases(rigBones, {"LowerArm_R", "RightForeArm", "RightLowerArm", "ForeArm_R", "mixamorig:RightForeArm", "Beta_Joints:RightForeArm", "Beta_Surface:RightForeArm"});
-    humanoidBoneMap[10] = findRigBoneByAliases(rigBones, {"Hand_R", "RightHand", "mixamorig:RightHand", "Beta_Joints:RightHand", "Beta_Surface:RightHand"});
-    humanoidBoneMap[11] = findRigBoneByAliases(rigBones, {"UpperLeg_L", "LeftUpLeg", "LeftThigh", "mixamorig:LeftUpLeg", "Beta_Joints:LeftUpLeg", "Beta_Surface:LeftUpLeg"});
-    humanoidBoneMap[12] = findRigBoneByAliases(rigBones, {"LowerLeg_L", "LeftLeg", "LeftCalf", "mixamorig:LeftLeg", "Beta_Joints:LeftLeg", "Beta_Surface:LeftLeg"});
-    humanoidBoneMap[13] = findRigBoneByAliases(rigBones, {"UpperLeg_R", "RightUpLeg", "RightThigh", "mixamorig:RightUpLeg", "Beta_Joints:RightUpLeg", "Beta_Surface:RightUpLeg"});
-    humanoidBoneMap[14] = findRigBoneByAliases(rigBones, {"LowerLeg_R", "RightLeg", "RightCalf", "mixamorig:RightLeg", "Beta_Joints:RightLeg", "Beta_Surface:RightLeg"});
+    for (const HumanoidMappingRule& rule : kHumanoidMappingRules) {
+        humanoidBoneMap[rule.slot] = findRigBoneByAliases(rigBones, rule.aliases);
+    }
 }
 
 void enforceHumanoidTPose(std::vector<RigBone>& rigBones) {
@@ -269,19 +325,12 @@ void enforceHumanoidTPose(std::vector<RigBone>& rigBones) {
         rigBones[i].localRotationDegrees = glm::vec3(0.0f);
     }
 
-    const auto setRotation = [&](std::initializer_list<const char*> aliases, const glm::vec3& degrees) {
-        const int index = findRigBoneByAliases(rigBones, aliases);
+    for (const TPoseRule& rule : kHumanoidTPoseRules) {
+        const int index = findRigBoneByAliases(rigBones, rule.aliases);
         if (index >= 0) {
-            rigBones[static_cast<std::size_t>(index)].localRotationDegrees = degrees;
+            rigBones[static_cast<std::size_t>(index)].localRotationDegrees = rule.rotationDegrees;
         }
-    };
-
-    setRotation({"Clavicle_L", "Shoulder_L", "LeftShoulder", "mixamorig:LeftShoulder", "Beta_Joints:LeftShoulder", "Beta_Surface:LeftShoulder"}, glm::vec3(0.0f, 0.0f, 90.0f));
-    setRotation({"Clavicle_R", "Shoulder_R", "RightShoulder", "mixamorig:RightShoulder", "Beta_Joints:RightShoulder", "Beta_Surface:RightShoulder"}, glm::vec3(0.0f, 0.0f, -90.0f));
-    setRotation({"UpperLeg_L", "LeftUpLeg", "LeftThigh", "mixamorig:LeftUpLeg", "Beta_Joints:LeftUpLeg", "Beta_Surface:LeftUpLeg"}, glm::vec3(0.0f, 0.0f, 180.0f));
-    setRotation({"UpperLeg_R", "RightUpLeg", "RightThigh", "mixamorig:RightUpLeg", "Beta_Joints:RightUpLeg", "Beta_Surface:RightUpLeg"}, glm::vec3(0.0f, 0.0f, 180.0f));
-    setRotation({"Foot_L", "LeftFoot", "mixamorig:LeftFoot", "Beta_Joints:LeftFoot", "Beta_Surface:LeftFoot"}, glm::vec3(-90.0f, 0.0f, 0.0f));
-    setRotation({"Foot_R", "RightFoot", "mixamorig:RightFoot", "Beta_Joints:RightFoot", "Beta_Surface:RightFoot"}, glm::vec3(-90.0f, 0.0f, 0.0f));
+    }
 }
 
 }  // namespace sparks::core::rigging

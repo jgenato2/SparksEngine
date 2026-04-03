@@ -106,6 +106,9 @@ endif()
 add_executable(SparksEngine
   src/app/main.cpp
   src/core/Application.cpp
+  src/core/ApplicationUi.cpp
+  src/core/ApplicationImport.cpp
+  src/core/FbxImport.cpp
   src/core/Rigging.cpp
   src/render/Renderer.cpp
   src/ui/PropertyPanel.cpp
