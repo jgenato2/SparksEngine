@@ -212,6 +212,16 @@ std::optional<render::ImportedModelData> loadFbxModel(
             model.alphaBlend = true;
         }
 
+        aiColor4D diffuse(1.0f, 1.0f, 1.0f, 1.0f);
+        if (material->Get(AI_MATKEY_COLOR_DIFFUSE, diffuse) == AI_SUCCESS) {
+            model.diffuseColor = glm::vec4(diffuse.r, diffuse.g, diffuse.b, diffuse.a);
+        }
+
+        aiColor3D emissive(0.0f, 0.0f, 0.0f);
+        if (material->Get(AI_MATKEY_COLOR_EMISSIVE, emissive) == AI_SUCCESS) {
+            model.emissiveColor = glm::vec3(emissive.r, emissive.g, emissive.b);
+        }
+
         aiString texPath;
         if (material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS) {
             const std::string texRef = texPath.C_Str();

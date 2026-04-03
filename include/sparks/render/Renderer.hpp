@@ -4,6 +4,7 @@
 
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 namespace sparks::render {
 
@@ -21,6 +22,8 @@ struct ImportedModelData {
     int textureHeight{1};
     float opacity{1.0f};
     bool alphaBlend{false};
+    glm::vec4 diffuseColor{1.0f, 1.0f, 1.0f, 1.0f};
+    glm::vec3 emissiveColor{0.0f, 0.0f, 0.0f};
     glm::vec3 position{0.0f, 0.0f, 0.0f};
     glm::vec3 rotationEulerDegrees{0.0f, 0.0f, 0.0f};
     glm::vec3 scale{1.0f, 1.0f, 1.0f};
@@ -64,6 +67,8 @@ private:
     int m_importIndexCount{0};
     float m_importOpacity{1.0f};
     bool m_importAlphaBlend{false};
+    glm::vec4 m_importDiffuseColor{1.0f, 1.0f, 1.0f, 1.0f};
+    glm::vec3 m_importEmissive{0.0f, 0.0f, 0.0f};
     glm::vec3 m_importPosition{0.0f, 0.0f, 0.0f};
     glm::vec3 m_importRotationEuler{0.0f, 0.0f, 0.0f};
     glm::vec3 m_importScale{1.0f, 1.0f, 1.0f};

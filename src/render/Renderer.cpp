@@ -132,6 +132,8 @@ unsigned int createTexturedProgram() {
         uniform vec3 uLightPos;
         uniform float uOpacity;
         uniform int uShadowPass;
+        uniform vec4 uDiffuseColor;
+        uniform vec3 uEmissive;
 
         void main() {
             if (uShadowPass == 1) {
@@ -139,7 +141,7 @@ unsigned int createTexturedProgram() {
                 return;
             }
 
-            vec4 base = texture(uTex, vUv);
+            vec4 base = texture(uTex, vUv) * uDiffuseColor;
             vec3 n = normalize(vWorldNormal);
             vec3 l = normalize(uLightPos - vWorldPos);
             float ndl = max(dot(n, l), 0.0);
@@ -148,7 +150,7 @@ unsigned int createTexturedProgram() {
             if (alpha <= 0.01) {
                 discard;
             }
-            FragColor = vec4(base.rgb * lit, alpha);
+            FragColor = vec4(base.rgb * lit + uEmissive, alpha);
         }
     )";
 
@@ -282,6 +284,8 @@ void Renderer::setImportedModel(const ImportedModelData& model) {
     m_importIndexCount = static_cast<int>(model.indices.size());
     m_importOpacity = model.opacity;
     m_importAlphaBlend = model.alphaBlend;
+    m_importDiffuseColor = model.diffuseColor;
+    m_importEmissive = model.emissiveColor;
     setImportedModelTransform(model.position, model.rotationEulerDegrees, model.scale);
 }
 
@@ -375,6 +379,8 @@ void Renderer::render(const ViewControls& viewControls) {
         const int texLocT = glGetUniformLocation(m_texturedProgram, "uTex");
         const int opacityLocT = glGetUniformLocation(m_texturedProgram, "uOpacity");
         const int shadowPassLocT = glGetUniformLocation(m_texturedProgram, "uShadowPass");
+        const int diffuseColorLocT = glGetUniformLocation(m_texturedProgram, "uDiffuseColor");
+        const int emissiveLocT = glGetUniformLocation(m_texturedProgram, "uEmissive");
 
         glm::mat4 model(1.0f);
         model = glm::translate(model, m_importPosition);
@@ -413,6 +419,8 @@ void Renderer::render(const ViewControls& viewControls) {
         glUniform1i(texLocT, 0);
         glUniform1f(opacityLocT, m_importOpacity);
         glUniform1i(shadowPassLocT, 0);
+        glUniform4f(diffuseColorLocT, m_importDiffuseColor.r, m_importDiffuseColor.g, m_importDiffuseColor.b, m_importDiffuseColor.a);
+        glUniform3f(emissiveLocT, m_importEmissive.r, m_importEmissive.g, m_importEmissive.b);
 
         if (m_importAlphaBlend) {
             glEnable(GL_BLEND);
