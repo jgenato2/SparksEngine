@@ -133,6 +133,7 @@ int Application::run() {
     double previousFrameTime = glfwGetTime();
 
     auto applyWeatherPreset = [&](const int presetIndex) {
+        constexpr float kTinyPresetRainLineWidth = 0.55f;
         WeatherSettings preset = weatherSystem.settings();
         preset.useCustomVisualProfile = false;
         preset.rainTint = glm::vec3(1.0f, 1.0f, 1.0f);
@@ -316,6 +317,8 @@ int Application::run() {
             preset.dropletOpacityScale = 1.25f;
             preset.rippleOpacityScale = 1.05f;
         }
+        // Keep rain preset visuals consistently thin.
+        preset.rainLineWidth = kTinyPresetRainLineWidth;
         weatherSystem.setSettings(preset);
         weatherPresetIndex = std::clamp(presetIndex, 0, 5);
     };
@@ -552,6 +555,43 @@ int Application::run() {
                 ImGui::Separator();
 
                 if (ImGui::BeginMenu("Skydome")) {
+                    if (ImGui::Button("Preset: Clear Sky")) {
+                        environmentSettings.enableSkydome = true;
+                        environmentSettings.skyHorizonColor   = glm::vec3(0.70f, 0.82f, 0.95f);
+                        environmentSettings.skyZenithColor    = glm::vec3(0.35f, 0.55f, 0.82f);
+                        environmentSettings.skyCloudColor     = glm::vec3(0.96f, 0.97f, 1.00f);
+                        environmentSettings.skyCloudAmount    = 0.06f;
+                        environmentSettings.skyCloudScale     = 1.0f;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Preset: Scattered Cumulus")) {
+                        environmentSettings.enableSkydome = true;
+                        environmentSettings.skyHorizonColor   = glm::vec3(0.72f, 0.84f, 0.96f);
+                        environmentSettings.skyZenithColor    = glm::vec3(0.30f, 0.50f, 0.80f);
+                        environmentSettings.skyCloudColor     = glm::vec3(0.97f, 0.97f, 1.00f);
+                        environmentSettings.skyCloudAmount    = 0.65f;
+                        environmentSettings.skyCloudScale     = 1.20f;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Preset: Heavy Overcast")) {
+                        environmentSettings.enableSkydome = true;
+                        environmentSettings.skyHorizonColor   = glm::vec3(0.68f, 0.72f, 0.78f);
+                        environmentSettings.skyZenithColor    = glm::vec3(0.52f, 0.57f, 0.64f);
+                        environmentSettings.skyCloudColor     = glm::vec3(0.88f, 0.89f, 0.91f);
+                        environmentSettings.skyCloudAmount    = 1.40f;
+                        environmentSettings.skyCloudScale     = 0.80f;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Preset: Golden Hour")) {
+                        environmentSettings.enableSkydome = true;
+                        environmentSettings.skyHorizonColor   = glm::vec3(0.92f, 0.62f, 0.38f);
+                        environmentSettings.skyZenithColor    = glm::vec3(0.28f, 0.40f, 0.70f);
+                        environmentSettings.skyCloudColor     = glm::vec3(1.00f, 0.78f, 0.52f);
+                        environmentSettings.skyCloudAmount    = 0.80f;
+                        environmentSettings.skyCloudScale     = 1.40f;
+                        envChanged = true;
+                    }
+                    ImGui::Separator();
                     envChanged |= ImGui::Checkbox("Enable Skydome", &environmentSettings.enableSkydome);
                     envChanged |= ImGui::SliderFloat("Skydome Radius", &environmentSettings.skydomeRadius, 20.0f, 4000.0f, "%.1f");
                     envChanged |= ImGui::ColorEdit3("Sky Horizon", &environmentSettings.skyHorizonColor.x);
@@ -590,17 +630,82 @@ int Application::run() {
                         environmentSettings.sunIntensity = 1.30f;
                         environmentSettings.waterSunStrength = 2.40f;
                         environmentSettings.sunHeatStrength = 0.45f;
+                        environmentSettings.sunRayStrength = 1.22f;
+                        environmentSettings.lensFlareStrength = 0.92f;
                         environmentSettings.sunColor = glm::vec3(1.00f, 0.94f, 0.79f);
+                        environmentSettings.enableFog = true;
+                        environmentSettings.fogColor = glm::vec3(0.69f, 0.76f, 0.83f);
+                        environmentSettings.fogNear = 12.0f;
+                        environmentSettings.fogFar = 126.0f;
+                        environmentSettings.fogStrength = 0.50f;
                         envChanged = true;
                     }
                     ImGui::SameLine();
                     ImGui::TextUnformatted("(Calibrated morning light)");
+
+                    if (ImGui::Button("Apply Clear Noon Preset")) {
+                        sunElevationDeg = 72.0f;
+                        sunAzimuthDeg = 178.0f;
+
+                        const float elevRad = glm::radians(sunElevationDeg);
+                        const float azimRad = glm::radians(sunAzimuthDeg);
+                        const float horizontal = std::cos(elevRad);
+                        const glm::vec3 rebuiltDir(
+                            std::sin(azimRad) * horizontal,
+                            std::sin(elevRad),
+                            std::cos(azimRad) * horizontal);
+                        environmentSettings.terrainLightDirection = rebuiltDir * lightLen;
+
+                        environmentSettings.enableSun = true;
+                        environmentSettings.sunIntensity = 1.10f;
+                        environmentSettings.waterSunStrength = 1.85f;
+                        environmentSettings.sunHeatStrength = 0.22f;
+                        environmentSettings.sunRayStrength = 0.42f;
+                        environmentSettings.lensFlareStrength = 0.36f;
+                        environmentSettings.sunColor = glm::vec3(1.00f, 0.98f, 0.92f);
+                        environmentSettings.enableFog = true;
+                        environmentSettings.fogColor = glm::vec3(0.71f, 0.81f, 0.90f);
+                        environmentSettings.fogNear = 42.0f;
+                        environmentSettings.fogFar = 240.0f;
+                        environmentSettings.fogStrength = 0.16f;
+                        envChanged = true;
+                    }
+
+                    if (ImGui::Button("Apply Cinematic Sunset Preset")) {
+                        sunElevationDeg = 12.0f;
+                        sunAzimuthDeg = 118.0f;
+
+                        const float elevRad = glm::radians(sunElevationDeg);
+                        const float azimRad = glm::radians(sunAzimuthDeg);
+                        const float horizontal = std::cos(elevRad);
+                        const glm::vec3 rebuiltDir(
+                            std::sin(azimRad) * horizontal,
+                            std::sin(elevRad),
+                            std::cos(azimRad) * horizontal);
+                        environmentSettings.terrainLightDirection = rebuiltDir * lightLen;
+
+                        environmentSettings.enableSun = true;
+                        environmentSettings.sunIntensity = 1.78f;
+                        environmentSettings.waterSunStrength = 2.85f;
+                        environmentSettings.sunHeatStrength = 0.82f;
+                        environmentSettings.sunRayStrength = 1.92f;
+                        environmentSettings.lensFlareStrength = 1.45f;
+                        environmentSettings.sunColor = glm::vec3(1.00f, 0.66f, 0.40f);
+                        environmentSettings.enableFog = true;
+                        environmentSettings.fogColor = glm::vec3(0.83f, 0.58f, 0.45f);
+                        environmentSettings.fogNear = 9.0f;
+                        environmentSettings.fogFar = 118.0f;
+                        environmentSettings.fogStrength = 0.68f;
+                        envChanged = true;
+                    }
 
                     envChanged |= ImGui::Checkbox("Enable Sun", &environmentSettings.enableSun);
                     envChanged |= ImGui::SliderFloat("Sun Disc Size", &environmentSettings.sunDiscSize, 0.2f, 8.0f, "%.2f");
                     envChanged |= ImGui::SliderFloat("Sun Intensity", &environmentSettings.sunIntensity, 0.0f, 4.0f, "%.2f");
                     envChanged |= ImGui::SliderFloat("Water Sun Strength", &environmentSettings.waterSunStrength, 0.0f, 6.0f, "%.2f");
                     envChanged |= ImGui::SliderFloat("Object Sun Glow", &environmentSettings.objectSunGlowStrength, 0.0f, 1.6f, "%.2f");
+                    envChanged |= ImGui::SliderFloat("Sun Ray Strength", &environmentSettings.sunRayStrength, 0.0f, 2.5f, "%.2f");
+                    envChanged |= ImGui::SliderFloat("Lens Flare Strength", &environmentSettings.lensFlareStrength, 0.0f, 2.5f, "%.2f");
                     envChanged |= ImGui::ColorEdit3("Sun Color", &environmentSettings.sunColor.x);
                     envChanged |= ImGui::SliderFloat("Heat Strength", &environmentSettings.sunHeatStrength, 0.0f, 3.0f, "%.2f");
                     envChanged |= ImGui::SliderFloat("Dust Amount", &environmentSettings.dustAmount, 0.0f, 1.5f, "%.2f");
@@ -623,6 +728,40 @@ int Application::run() {
                 }
 
                 if (ImGui::BeginMenu("Terrain")) {
+                    if (ImGui::Button("Apply Steep Hill Preset")) {
+                        environmentSettings.enableTerrain = true;
+                        environmentSettings.terrainSize = 240.0f;
+                        environmentSettings.terrainHeight = -0.95f;
+                        environmentSettings.terrainColorA = glm::vec3(0.14f, 0.19f, 0.13f);
+                        environmentSettings.terrainColorB = glm::vec3(0.22f, 0.27f, 0.19f);
+                        environmentSettings.terrainPatchScale = 0.16f;
+                        environmentSettings.terrainRoughness = 1.55f;
+                        environmentSettings.fbxShadowSoftness = 1.15f;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Apply Natural Hills Preset")) {
+                        environmentSettings.enableTerrain = true;
+                        environmentSettings.terrainSize = 260.0f;
+                        environmentSettings.terrainHeight = -0.70f;
+                        environmentSettings.terrainColorA = glm::vec3(0.15f, 0.20f, 0.14f);
+                        environmentSettings.terrainColorB = glm::vec3(0.25f, 0.30f, 0.22f);
+                        environmentSettings.terrainPatchScale = 0.13f;
+                        environmentSettings.terrainRoughness = 1.15f;
+                        environmentSettings.fbxShadowSoftness = 1.10f;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Apply Open Plains Preset")) {
+                        environmentSettings.enableTerrain = true;
+                        environmentSettings.terrainSize = 320.0f;
+                        environmentSettings.terrainHeight = -0.60f;
+                        environmentSettings.terrainColorA = glm::vec3(0.19f, 0.22f, 0.15f);
+                        environmentSettings.terrainColorB = glm::vec3(0.28f, 0.31f, 0.22f);
+                        environmentSettings.terrainPatchScale = 0.09f;
+                        environmentSettings.terrainRoughness = 0.72f;
+                        environmentSettings.fbxShadowSoftness = 1.00f;
+                        envChanged = true;
+                    }
+                    ImGui::Separator();
                     envChanged |= ImGui::Checkbox("Enable Terrain", &environmentSettings.enableTerrain);
                     envChanged |= ImGui::SliderFloat("Terrain Size", &environmentSettings.terrainSize, 20.0f, 4000.0f, "%.1f");
                     envChanged |= ImGui::SliderFloat("Terrain Height", &environmentSettings.terrainHeight, -20.0f, 20.0f, "%.2f");
@@ -635,12 +774,65 @@ int Application::run() {
                 }
 
                 if (ImGui::BeginMenu("Water")) {
+                    if (ImGui::Button("Apply Clear Lake Preset")) {
+                        environmentSettings.enableWater = true;
+                        environmentSettings.waterLevel = 0.0f;
+                        environmentSettings.waterColor = glm::vec3(0.12f, 0.44f, 0.60f);
+                        environmentSettings.waterOpacity = 0.34f;
+                        environmentSettings.waveAmplitude = 0.09f;
+                        environmentSettings.waveFrequency = 1.45f;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Apply Windy Ocean Preset")) {
+                        environmentSettings.enableWater = true;
+                        environmentSettings.waterLevel = 0.0f;
+                        environmentSettings.waterColor = glm::vec3(0.09f, 0.32f, 0.52f);
+                        environmentSettings.waterOpacity = 0.46f;
+                        environmentSettings.waveAmplitude = 0.26f;
+                        environmentSettings.waveFrequency = 2.35f;
+                        envChanged = true;
+                    }
+                    ImGui::Separator();
                     envChanged |= ImGui::Checkbox("Enable Water", &environmentSettings.enableWater);
                     envChanged |= ImGui::SliderFloat("Water Level", &environmentSettings.waterLevel, -10.0f, 10.0f, "%.2f");
                     envChanged |= ImGui::ColorEdit3("Water Color", &environmentSettings.waterColor.x);
                     envChanged |= ImGui::SliderFloat("Water Opacity", &environmentSettings.waterOpacity, 0.1f, 1.0f, "%.2f");
                     envChanged |= ImGui::SliderFloat("Wave Amplitude", &environmentSettings.waveAmplitude, 0.0f, 1.0f, "%.3f");
                     envChanged |= ImGui::SliderFloat("Wave Frequency", &environmentSettings.waveFrequency, 0.1f, 5.0f, "%.2f");
+                    ImGui::EndMenu();
+                }
+
+                if (ImGui::BeginMenu("Fog")) {
+                    if (ImGui::Button("Apply Clear Air Preset")) {
+                        environmentSettings.enableFog = true;
+                        environmentSettings.fogColor = glm::vec3(0.72f, 0.82f, 0.92f);
+                        environmentSettings.fogNear = 55.0f;
+                        environmentSettings.fogFar = 300.0f;
+                        environmentSettings.fogStrength = 0.12f;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Apply Morning Mist Preset")) {
+                        environmentSettings.enableFog = true;
+                        environmentSettings.fogColor = glm::vec3(0.74f, 0.79f, 0.85f);
+                        environmentSettings.fogNear = 14.0f;
+                        environmentSettings.fogFar = 140.0f;
+                        environmentSettings.fogStrength = 0.48f;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Apply Heavy Cinematic Fog Preset")) {
+                        environmentSettings.enableFog = true;
+                        environmentSettings.fogColor = glm::vec3(0.64f, 0.66f, 0.70f);
+                        environmentSettings.fogNear = 6.0f;
+                        environmentSettings.fogFar = 82.0f;
+                        environmentSettings.fogStrength = 0.76f;
+                        envChanged = true;
+                    }
+                    ImGui::Separator();
+                    envChanged |= ImGui::Checkbox("Enable Fog", &environmentSettings.enableFog);
+                    envChanged |= ImGui::ColorEdit3("Fog Color", &environmentSettings.fogColor.x);
+                    envChanged |= ImGui::SliderFloat("Fog Near", &environmentSettings.fogNear, 1.0f, 250.0f, "%.1f");
+                    envChanged |= ImGui::SliderFloat("Fog Far", &environmentSettings.fogFar, 5.0f, 500.0f, "%.1f");
+                    envChanged |= ImGui::SliderFloat("Fog Strength", &environmentSettings.fogStrength, 0.0f, 1.0f, "%.2f");
                     ImGui::EndMenu();
                 }
 
@@ -765,6 +957,109 @@ int Application::run() {
                         scatterClouds(true);
                     }
 
+                    ImGui::Separator();
+                    if (ImGui::Button("Preset: Sparse Puffs")) {
+                        environmentSettings.cloudObjects.clear();
+                        selectedCloudIndices.clear();
+                        scatterSeed  = 42;
+                        scatterCloudCount = 10;
+                        std::mt19937 rng(42u);
+                        std::uniform_real_distribution<float> xzD(-55.0f, 55.0f);
+                        std::uniform_real_distribution<float> yD(10.0f, 22.0f);
+                        std::uniform_real_distribution<float> yawD(-180.0f, 180.0f);
+                        std::uniform_int_distribution<unsigned int> seedD(1u, 0xffffffffu);
+                        for (int ci = 0; ci < 10; ++ci) {
+                            sparks::render::CloudObjectSettings c;
+                            c.position             = glm::vec3(xzD(rng), yD(rng), xzD(rng));
+                            c.rotationEulerDegrees = glm::vec3(0.0f, yawD(rng), 0.0f);
+                            c.scale                = glm::vec3(4.5f + (ci % 3) * 1.2f, 1.8f + (ci % 2) * 0.6f, 3.8f + (ci % 3) * 1.0f);
+                            c.color                = glm::vec3(0.96f, 0.97f, 1.0f);
+                            c.opacity              = 0.72f;
+                            c.softness             = 0.80f;
+                            c.detail               = 1.0f;
+                            c.planeFade            = 0.90f;
+                            c.planeCount           = 1;
+                            c.cubeSpread           = 1.0f;
+                            c.motionSpeed          = 1.0f;
+                            c.cloudType            = ci % 2;
+                            c.planeSelectionSeed   = seedD(rng);
+                            environmentSettings.cloudObjects.push_back(c);
+                        }
+                        environmentSettings.enableCloudObjects = true;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Preset: Full Cloud Cover")) {
+                        environmentSettings.cloudObjects.clear();
+                        selectedCloudIndices.clear();
+                        scatterSeed  = 77;
+                        scatterCloudCount = 32;
+                        std::mt19937 rng(77u);
+                        std::uniform_real_distribution<float> xzD(-70.0f, 70.0f);
+                        std::uniform_real_distribution<float> yD(12.0f, 30.0f);
+                        std::uniform_real_distribution<float> yawD(-180.0f, 180.0f);
+                        std::uniform_real_distribution<float> opD(0.60f, 0.92f);
+                        std::uniform_real_distribution<float> sxD(3.5f, 9.0f);
+                        std::uniform_real_distribution<float> syD(1.2f, 3.0f);
+                        std::uniform_real_distribution<float> szD(2.8f, 7.5f);
+                        std::uniform_real_distribution<float> tintD(-0.06f, 0.03f);
+                        std::uniform_int_distribution<int> typeD(0, 3);
+                        std::uniform_int_distribution<unsigned int> seedD(1u, 0xffffffffu);
+                        for (int ci = 0; ci < 32; ++ci) {
+                            sparks::render::CloudObjectSettings c;
+                            c.position             = glm::vec3(xzD(rng), yD(rng), xzD(rng));
+                            c.rotationEulerDegrees = glm::vec3(0.0f, yawD(rng), 0.0f);
+                            c.scale                = glm::vec3(sxD(rng), syD(rng), szD(rng));
+                            const float t          = tintD(rng);
+                            c.color                = glm::clamp(glm::vec3(0.94f+t, 0.95f+t, 0.98f+t), glm::vec3(0.75f), glm::vec3(1.0f));
+                            c.opacity              = opD(rng);
+                            c.softness             = 0.82f;
+                            c.detail               = 1.2f;
+                            c.planeFade            = 0.90f;
+                            c.planeCount           = 1;
+                            c.cubeSpread           = 1.0f;
+                            c.motionSpeed          = 1.0f;
+                            c.cloudType            = typeD(rng);
+                            c.planeSelectionSeed   = seedD(rng);
+                            environmentSettings.cloudObjects.push_back(c);
+                        }
+                        environmentSettings.enableCloudObjects = true;
+                        envChanged = true;
+                    }
+                    if (ImGui::Button("Preset: Stormy Clouds")) {
+                        environmentSettings.cloudObjects.clear();
+                        selectedCloudIndices.clear();
+                        scatterSeed  = 13;
+                        scatterCloudCount = 24;
+                        std::mt19937 rng(13u);
+                        std::uniform_real_distribution<float> xzD(-65.0f, 65.0f);
+                        std::uniform_real_distribution<float> yD(8.0f, 20.0f);
+                        std::uniform_real_distribution<float> yawD(-180.0f, 180.0f);
+                        std::uniform_real_distribution<float> opD(0.78f, 0.98f);
+                        std::uniform_real_distribution<float> sxD(5.0f, 12.0f);
+                        std::uniform_real_distribution<float> syD(2.0f, 4.5f);
+                        std::uniform_real_distribution<float> szD(4.0f, 10.0f);
+                        std::uniform_int_distribution<unsigned int> seedD(1u, 0xffffffffu);
+                        for (int ci = 0; ci < 24; ++ci) {
+                            sparks::render::CloudObjectSettings c;
+                            c.position             = glm::vec3(xzD(rng), yD(rng), xzD(rng));
+                            c.rotationEulerDegrees = glm::vec3(0.0f, yawD(rng), 0.0f);
+                            c.scale                = glm::vec3(sxD(rng), syD(rng), szD(rng));
+                            c.color                = glm::vec3(0.62f, 0.64f, 0.68f);
+                            c.opacity              = opD(rng);
+                            c.softness             = 0.88f;
+                            c.detail               = 1.8f;
+                            c.planeFade            = 0.90f;
+                            c.planeCount           = 1;
+                            c.cubeSpread           = 1.0f;
+                            c.motionSpeed          = 2.2f;
+                            c.cloudType            = 2;
+                            c.planeSelectionSeed   = seedD(rng);
+                            environmentSettings.cloudObjects.push_back(c);
+                        }
+                        environmentSettings.enableCloudObjects = true;
+                        envChanged = true;
+                    }
+                    ImGui::Separator();
                     if (ImGui::MenuItem("Clear All Clouds", nullptr, false, !environmentSettings.cloudObjects.empty())) {
                         environmentSettings.cloudObjects.clear();
                         selectedCloudIndices.clear();

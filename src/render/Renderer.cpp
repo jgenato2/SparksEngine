@@ -237,6 +237,11 @@ unsigned int createTexturedProgram() {
         uniform int uWaterEnabled;
         uniform float uWaterLevel;
         uniform vec3 uWaterTint;
+        uniform vec3 uCameraPos;
+        uniform vec3 uFogColor;
+        uniform float uFogNear;
+        uniform float uFogFar;
+        uniform float uFogStrength;
 
         void main() {
             if (uShadowPass == 1) {
@@ -271,6 +276,11 @@ unsigned int createTexturedProgram() {
                 underwaterColor += vec3(0.07, 0.11, 0.09) * waterline * 0.45;
                 color = underwaterColor;
             }
+
+            float fogSpan = max(uFogFar - uFogNear, 0.001);
+            float fogT = clamp((distance(vWorldPos, uCameraPos) - uFogNear) / fogSpan, 0.0, 1.0);
+            float fogAmount = pow(fogT, 1.25) * clamp(uFogStrength, 0.0, 1.0);
+            color = mix(color, uFogColor, fogAmount);
 
             FragColor = vec4(color, alpha);
         }
@@ -332,6 +342,8 @@ unsigned int createSkydomeProgram() {
         uniform float uSunHeatStrength;
         uniform float uDustAmount;
         uniform vec3 uDustColor;
+        uniform float uSunRayStrength;
+        uniform float uLensFlareStrength;
         uniform float uTime;
         uniform sampler2D uSkyTex;
         uniform int uUseTexture;
@@ -342,21 +354,101 @@ unsigned int createSkydomeProgram() {
             return fract(p.x * p.y);
         }
 
-        float saturate(float v) {
-            return clamp(v, 0.0, 1.0);
+        float noise2Sky(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash21(i);
+            float b = hash21(i + vec2(1.0, 0.0));
+            float c = hash21(i + vec2(0.0, 1.0));
+            float d = hash21(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }
+
+        float fbm4Sky(vec2 p) {
+            float v = 0.0;
+            float a = 0.55;
+            mat2 rot = mat2(0.80, -0.60, 0.60, 0.80);
+            for (int i = 0; i < 4; ++i) {
+                v += a * noise2Sky(p);
+                p = rot * p * 2.02 + vec2(1.37, -0.91);
+                a *= 0.5;
+            }
+            return v;
         }
 
         void main() {
             float h = clamp(vLocalPos.y * 0.5 + 0.5, 0.0, 1.0);
-            float cloudNoise = sin(vLocalPos.x * 6.0 * uCloudScale) * cos(vLocalPos.z * 7.0 * uCloudScale);
-            float cloud = smoothstep(0.35, 0.85, cloudNoise * 0.5 + 0.5) * (1.0 - h) * uCloudAmount;
-            vec3 color = mix(uHorizonColor, uZenithColor, pow(h, 0.62));
-            color = mix(color, uCloudColor, cloud);
 
-            // Explicit visible sun disc + soft halo for consistent water god-ray origin.
+            // ── Directions (needed early for cloud sun-shading) ───────────────
             vec3 skyDir = normalize(vLocalPos);
             vec3 sunDir = normalize(uSunDir);
             float sunDot = max(dot(skyDir, sunDir), 0.0);
+
+            // ── Procedural cloud layers ──────────────────────────────────────
+            // Use a clamped plane projection: divide by max(y, minY) so that
+            // clouds fill the upper sky hemisphere and stay visually close together.
+            // Higher minY clamp = clouds pulled toward zenith (tighter clustering).
+            float yGuard   = max(skyDir.y, 0.12);
+            vec2  cloudPlane = skyDir.xz / yGuard;
+            float cloudSc  = 0.038 * uCloudScale;
+            vec2  uv0      = cloudPlane * cloudSc;
+
+            vec2 windA = vec2( 0.018, -0.011) * uTime;
+            vec2 windB = vec2(-0.009,  0.015) * uTime;
+            vec2 windC = vec2( 0.013, -0.021) * uTime;
+
+            // Domain warp: mild warp so clouds stay clumped but have organic edges.
+            float warpX = fbm4Sky(uv0 * 0.55 + windB        + vec2(7.8, 3.1));
+            float warpY = fbm4Sky(uv0 * 0.55 + windB * 1.3  + vec2(2.3, 8.4));
+            vec2  warped = uv0 + (vec2(warpX, warpY) - 0.5) * 0.22;
+
+            // Cumulus layer: large base shape + fine surface detail.
+            // Lower base frequency = broader, more connected cloud masses.
+            float cumBase   = fbm4Sky(warped + windA);
+            float cumDetail = fbm4Sky(warped * 2.10 + windC + vec2(4.1, 2.7));
+            float cumDens   = cumBase * 0.75 + cumDetail * 0.25;
+            // Threshold: lower floor so clouds form more readily and stay together.
+            float cumThresh = mix(0.44, 0.58, 1.0 - clamp(uCloudAmount, 0.0, 1.0));
+            float cumAlpha  = smoothstep(cumThresh, cumThresh + 0.14, cumDens);
+
+            // Cirrus layer: slightly larger scale so cirrus bands are continuous.
+            vec2  uvCi    = cloudPlane * cloudSc * 0.55 + windA * 1.75;
+            float cirA    = fbm4Sky(uvCi              + vec2(3.7, 5.2));
+            float cirB    = fbm4Sky(uvCi * 1.60       + vec2(8.1, 1.9));
+            float cirAlpha = smoothstep(0.48, 0.64, cirA * 0.60 + cirB * 0.40) * 0.52;
+
+            // Fade both layers away near the horizon to prevent hard skyline edge.
+            float horizFade = smoothstep(0.0, 0.22, skyDir.y);
+            cumAlpha  *= horizFade;
+            cirAlpha  *= horizFade;
+
+            // ── Cloud shading ────────────────────────────────────────────────
+            // Sun-facing side of clouds is up to ~40 % brighter
+            float sunFacing   = dot(skyDir, sunDir) * 0.5 + 0.5;
+            float cloudBright = mix(0.74, 1.14, sunFacing);
+            // Thick cumulus self-shadows its own base
+            float selfShadow  = 1.0 - cumAlpha * 0.30;
+
+            // Silver lining: thin bright edge where cloud backlights against sun
+            float sunVisibility = smoothstep(0.01, 0.14, sunDir.y);
+            float silverEntry = pow(sunDot, 20.0);
+            float silverMask  = smoothstep(0.04, 0.26, cumAlpha) * (1.0 - cumAlpha * 0.78);
+            float silver      = silverEntry * silverMask * clamp(sunDir.y * 4.0, 0.0, 1.0) * sunVisibility;
+
+            vec3  cloudLit    = uCloudColor * cloudBright * selfShadow;
+            cloudLit         += uSunColor * uSunIntensity * silver * 0.28;
+            // Cirrus has a slightly blue-grey tint from zenith colour bleed
+            vec3  cirrusColor = mix(uCloudColor, uZenithColor * 1.10, 0.40);
+
+            float cloudAmt = clamp(uCloudAmount, 0.0, 1.5);
+
+            // ── Sky gradient + cloud composite ───────────────────────────────
+            vec3 color = mix(uHorizonColor, uZenithColor, pow(h, 0.62));
+            color = mix(color, cloudLit,    cumAlpha  * cloudAmt);
+            color = mix(color, cirrusColor, cirAlpha  * cloudAmt);
+
+            // Sun disc, halo, rays, lens flare
             float upperHemisphereMask = smoothstep(0.02, 0.30, h) * smoothstep(-0.02, 0.18, skyDir.y);
             vec3 refAxis = (abs(sunDir.y) > 0.96) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
             vec3 sunRight = normalize(cross(refAxis, sunDir));
@@ -364,50 +456,55 @@ unsigned int createSkydomeProgram() {
             vec2 sunPlane = vec2(dot(skyDir, sunRight), dot(skyDir, sunUp));
             float sunPlaneLen = length(sunPlane);
             float sunAngle = atan(sunPlane.y, sunPlane.x);
-            float sizeN = clamp((uSunDiscSize - 0.2) / 3.8, 0.0, 1.0);
-            float discOuter = mix(0.99970, 0.99845, sizeN);
-            float discInner = mix(0.99993, 0.99895, sizeN);
+            float sizeN = clamp((uSunDiscSize - 0.2) / 7.8, 0.0, 1.0);
+            float discOuter = mix(0.99978, 0.99908, sizeN);
+            float discInner = mix(0.99995, 0.99935, sizeN);
             float sunDisc = smoothstep(discOuter, discInner, sunDot);
 
-            float heatZone = smoothstep(0.90, 0.999, sunDot) * upperHemisphereMask;
+            float heatZone = smoothstep(0.90, 0.999, sunDot) * upperHemisphereMask * sunVisibility;
 
-            float haloNarrow = pow(sunDot, mix(34.0, 18.0, sizeN)) * 0.28;
-            float haloWide = pow(sunDot, mix(8.0, 4.5, sizeN)) * 0.10;
+            float haloNarrow = pow(sunDot, mix(42.0, 28.0, sizeN)) * 0.14;
+            float haloWide = pow(sunDot, mix(16.0, 9.0, sizeN)) * 0.04;
             float sunHalo = haloNarrow + haloWide;
-            float rayCore = pow(saturate(1.0 - sunPlaneLen * mix(11.0, 6.0, sizeN)), 2.2);
-            float crossH = pow(saturate(1.0 - abs(sunPlane.y) * 30.0), 6.0);
-            float crossV = pow(saturate(1.0 - abs(sunPlane.x) * 35.0), 7.0);
-            float diagA = pow(saturate(1.0 - abs(sunPlane.x + sunPlane.y) * 22.0), 8.0);
-            float diagB = pow(saturate(1.0 - abs(sunPlane.x - sunPlane.y) * 22.0), 8.0);
-            float raySpark = pow(abs(cos(sunAngle * 8.0)), 22.0) * 0.10;
-            float sunRays = rayCore * (crossH * 0.26 + crossV * 0.22 + diagA * 0.10 + diagB * 0.10 + raySpark);
+            float rayCore = pow(clamp(1.0 - sunPlaneLen * mix(15.0, 9.0, sizeN), 0.0, 1.0), 2.8);
+            float crossH = pow(clamp(1.0 - abs(sunPlane.y) * 38.0, 0.0, 1.0), 7.5);
+            float crossV = pow(clamp(1.0 - abs(sunPlane.x) * 42.0, 0.0, 1.0), 8.0);
+            float diagA = pow(clamp(1.0 - abs(sunPlane.x + sunPlane.y) * 28.0, 0.0, 1.0), 9.0);
+            float diagB = pow(clamp(1.0 - abs(sunPlane.x - sunPlane.y) * 28.0, 0.0, 1.0), 9.0);
+            float raySpark = pow(abs(cos(sunAngle * 8.0)), 24.0) * 0.04;
+            float flarePulse = 0.86 + 0.14 * sin(uTime * 0.90 + sunAngle * 2.0);
+            float flareTwinkle = 0.70 + 0.30 * sin(uTime * 1.70 + sunAngle * 11.0 + sunPlaneLen * 120.0);
+            float sunRays = rayCore * (crossH * 0.07 + crossV * 0.06 + diagA * 0.03 + diagB * 0.03 + raySpark) * flareTwinkle;
+            sunRays *= clamp(uSunRayStrength, 0.0, 2.5);
 
-            float streakH = pow(saturate(1.0 - abs(sunPlane.y) * 36.0), 5.5) * pow(saturate(1.0 - sunPlaneLen * 1.8), 2.0);
-            float streakV = pow(saturate(1.0 - abs(sunPlane.x) * 42.0), 7.0) * pow(saturate(1.0 - sunPlaneLen * 2.2), 2.4);
+            float streakH = pow(clamp(1.0 - abs(sunPlane.y) * 44.0, 0.0, 1.0), 6.0) * pow(clamp(1.0 - sunPlaneLen * 2.4, 0.0, 1.0), 2.2);
+            float streakV = pow(clamp(1.0 - abs(sunPlane.x) * 50.0, 0.0, 1.0), 8.0) * pow(clamp(1.0 - sunPlaneLen * 2.8, 0.0, 1.0), 2.8);
             float lensRingOuter = smoothstep(0.24, 0.05, sunPlaneLen) * (1.0 - smoothstep(0.10, 0.02, sunPlaneLen));
             float lensRingInner = smoothstep(0.14, 0.03, sunPlaneLen) * (1.0 - smoothstep(0.055, 0.010, sunPlaneLen));
-            float lensHalo = pow(saturate(1.0 - sunPlaneLen * 3.4), 4.0) * 0.20;
+            float lensHalo = pow(clamp(1.0 - sunPlaneLen * 4.0, 0.0, 1.0), 4.5) * 0.08;
+            float lensShimmer = pow(clamp(1.0 - sunPlaneLen * 5.2, 0.0, 1.0), 5.0) * (0.55 + 0.45 * sin(uTime * 1.25 + sunAngle * 9.0));
+            float lensRingPulse = (0.72 + 0.28 * sin(uTime * 0.75 + sunPlaneLen * 36.0));
+            float lensGain = clamp(uLensFlareStrength, 0.0, 2.5);
             float chromaRing = smoothstep(0.22, 0.11, sunPlaneLen) * (1.0 - smoothstep(0.14, 0.06, sunPlaneLen));
-            float petalMask = pow(abs(cos(sunAngle * 6.0)), 6.0) * pow(saturate(1.0 - sunPlaneLen * 5.5), 2.2);
-            float anamorphic = pow(saturate(1.0 - abs(sunPlane.y) * 22.0), 5.0) * pow(saturate(1.0 - sunPlaneLen * 2.0), 1.8);
+            float petalMask = pow(abs(cos(sunAngle * 6.0)), 6.0) * pow(clamp(1.0 - sunPlaneLen * 6.0, 0.0, 1.0), 2.5);
+            float anamorphic = pow(clamp(1.0 - abs(sunPlane.y) * 28.0, 0.0, 1.0), 5.5) * pow(clamp(1.0 - sunPlaneLen * 2.6, 0.0, 1.0), 2.0);
 
             vec3 lensColor = vec3(uSunColor.r, uSunColor.g * 0.88, uSunColor.b * 1.05);
             vec3 chromaColor = vec3(uSunColor.r * 1.10, uSunColor.g * 0.92, uSunColor.b * 1.18);
             vec3 petalColor = mix(vec3(0.90, 0.97, 1.0), uSunColor, 0.45);
 
-            color += uSunColor * uSunIntensity * upperHemisphereMask * (sunDisc * 1.25 + sunHalo + sunRays + streakH * 0.22 + streakV * 0.10);
-            color += lensColor * uSunIntensity * upperHemisphereMask * (lensRingOuter * 0.18 + lensRingInner * 0.12 + lensHalo);
-            color += chromaColor * uSunIntensity * upperHemisphereMask * chromaRing * 0.20;
-            color += petalColor * uSunIntensity * upperHemisphereMask * petalMask * 0.26;
-            color += vec3(1.0, 0.96, 0.90) * uSunIntensity * upperHemisphereMask * anamorphic * 0.14;
+            float sunFxMask = upperHemisphereMask * sunVisibility;
+            color += uSunColor * uSunIntensity * sunFxMask * (sunDisc * 0.85 + (sunHalo + sunRays) * flarePulse + streakH * 0.05 + streakV * 0.03);
+            color += lensColor * uSunIntensity * sunFxMask * ((lensRingOuter * 0.08 + lensRingInner * 0.05) * lensRingPulse + lensHalo + lensShimmer * 0.16) * lensGain;
+            color += chromaColor * uSunIntensity * sunFxMask * chromaRing * (0.05 * lensGain);
+            color += petalColor * uSunIntensity * sunFxMask * petalMask * (0.06 * lensGain);
+            color += vec3(1.0, 0.96, 0.90) * uSunIntensity * sunFxMask * anamorphic * (0.04 * lensGain);
 
             float horizon = 1.0 - h;
             float dustForward = smoothstep(0.0, 0.98, sunDot);
             float dustNoise = hash21(vLocalPos.xz * 120.0 + vec2(uTime * 0.08, -uTime * 0.06));
             float dustSpeck = smoothstep(0.985, 1.0, dustNoise) * dustForward;
             float dust = clamp(uDustAmount * (horizon * (0.35 + dustForward * 0.65) + dustSpeck * 0.20), 0.0, 0.95);
-            color = mix(color, uDustColor, dust);
-            color += uSunColor * (uSunHeatStrength * 0.035) * heatZone;
 
             if (uUseTexture == 1) {
                 vec3 dir = normalize(vLocalPos);
@@ -418,6 +515,10 @@ unsigned int createSkydomeProgram() {
                 vec3 texColor = texture(uSkyTex, vec2(u, vSky)).rgb;
                 color = mix(color, texColor, 0.88);
             }
+
+            // Apply atmospheric dust after sky composition so UI dust controls remain visible.
+            color = mix(color, uDustColor, dust);
+            color += uSunColor * (uSunHeatStrength * 0.035) * heatZone;
 
             FragColor = vec4(color, 1.0);
         }
@@ -498,6 +599,11 @@ unsigned int createTerrainProgram() {
         uniform float uShadowMinorRadius;
         uniform float uShadowStrength;
         uniform float uShadowSoftness;
+        uniform vec3 uCameraPos;
+        uniform vec3 uFogColor;
+        uniform float uFogNear;
+        uniform float uFogFar;
+        uniform float uFogStrength;
 
         float hash21(vec2 p) {
             p = fract(p * vec2(123.456, 789.012));
@@ -541,19 +647,25 @@ unsigned int createTerrainProgram() {
             color *= mix(0.70, 1.15 + uRoughness * 0.12, ndl);
 
             // Terrain self-shadowing from hills/ridges along light direction.
-            vec2 lightXZ = normalize(vec2(uLightDir.x, uLightDir.z));
-            if (length(lightXZ) > 0.0001) {
+            // Use the actual sun ray slope to avoid column/banding artifacts at high sun elevations.
+            vec3 lightN = normalize(uLightDir);
+            vec2 lightXZVec = vec2(lightN.x, lightN.z);
+            float lightXZLen = length(lightXZVec);
+            if (lightXZLen > 0.0001) {
+                vec2 lightXZ = lightXZVec / lightXZLen;
+                float raySlope = lightN.y / lightXZLen;
                 float currentH = vLocalPos.y;
                 float occlusion = 0.0;
                 for (int i = 1; i <= 4; ++i) {
                     float dist = float(i) * 3.2;
                     vec2 sampleXZ = vLocalPos.xz + lightXZ * dist;
                     float sampleH = terrainHeightOffset(sampleXZ, uPatchScale, uRoughness);
-                    float rayH = currentH + dist * 0.12;
-                    float block = smoothstep(rayH + 0.05, rayH + 0.75, sampleH);
+                    float rayH = currentH + dist * raySlope;
+                    float block = smoothstep(rayH + 0.02, rayH + 0.55, sampleH);
                     occlusion = max(occlusion, block * (1.0 - float(i - 1) * 0.18));
                 }
-                color *= (1.0 - clamp(occlusion * 0.38, 0.0, 0.45));
+                float shadowWeight = clamp(1.0 - lightN.y, 0.0, 1.0);
+                color *= (1.0 - clamp(occlusion * 0.30 * shadowWeight, 0.0, 0.35));
             }
 
             if (uShadowEnabled == 1) {
@@ -564,13 +676,18 @@ unsigned int createTerrainProgram() {
                 float majorRadius = max(uShadowMajorRadius, 0.1);
                 float minorRadius = max(uShadowMinorRadius, 0.1);
                 float ellipse = (along * along) / (majorRadius * majorRadius) + (perp * perp) / (minorRadius * minorRadius);
-                float soft = clamp(uShadowSoftness, 0.4, 3.0);
-                float outer = mix(1.02, 1.22, clamp(soft * 0.5, 0.0, 1.0));
-                float inner = max(0.20, 0.74 - soft * 0.14);
+                float soft = clamp(uShadowSoftness, 0.1, 3.0);
+                float outer = 1.0 + soft * 0.06;          // edge of ellipse (soft edge bleeds slightly outside)
+                float inner = max(0.05, 1.0 - soft * 0.4); // inner full-dark zone
                 float edgeSoft = smoothstep(outer, inner, ellipse);
                 float shadowAmount = clamp(edgeSoft * uShadowStrength, 0.0, 0.92);
                 color *= (1.0 - shadowAmount);
             }
+
+            float fogSpan = max(uFogFar - uFogNear, 0.001);
+            float fogT = clamp((distance(vWorldPos, uCameraPos) - uFogNear) / fogSpan, 0.0, 1.0);
+            float fogAmount = pow(fogT, 1.25) * clamp(uFogStrength, 0.0, 1.0);
+            color = mix(color, uFogColor, fogAmount);
 
             FragColor = vec4(color, 1.0);
         }
@@ -682,6 +799,10 @@ unsigned int createWaterProgram() {
         uniform vec2  uInteractionCenter;
         uniform float uInteractionRadius;
         uniform float uInteractionAmount;
+        uniform vec3  uFogColor;
+        uniform float uFogNear;
+        uniform float uFogFar;
+        uniform float uFogStrength;
 
         out vec4 fragColor;
 
@@ -693,26 +814,26 @@ unsigned int createWaterProgram() {
             p += dot(p, p + 184.75);
             return fract(p.x * p.y);
         }
-        float vnoise(vec2 p) {
+        float vnoiseWater(vec2 p) {
             vec2 i = floor(p), f = fract(p);
             f = f * f * (3.0 - 2.0 * f);
             return mix(mix(hash21(i),           hash21(i+vec2(1,0)), f.x),
                        mix(hash21(i+vec2(0,1)), hash21(i+vec2(1,1)), f.x), f.y);
         }
-        float fbm3(vec2 p) {
-            return vnoise(p)*0.500 + vnoise(p*2.03+1.7)*0.250 + vnoise(p*4.11+3.2)*0.125;
+        float fbm3Water(vec2 p) {
+            return vnoiseWater(p)*0.500 + vnoiseWater(p*2.03+1.7)*0.250 + vnoiseWater(p*4.11+3.2)*0.125;
         }
-        float fbm5(vec2 p) {
-            return vnoise(p)*0.500
-                 + vnoise(p*2.03+1.70)*0.250
-                 + vnoise(p*4.11+3.20)*0.125
-                 + vnoise(p*8.17+5.90)*0.0625
-                 + vnoise(p*16.3+11.3)*0.03125;
+        float fbm5Water(vec2 p) {
+            return vnoiseWater(p)*0.500
+                 + vnoiseWater(p*2.03+1.70)*0.250
+                 + vnoiseWater(p*4.11+3.20)*0.125
+                 + vnoiseWater(p*8.17+5.90)*0.0625
+                 + vnoiseWater(p*16.3+11.3)*0.03125;
         }
         float glitterMask(vec2 xz, float t) {
             vec2 uvA = xz * 9.5 + vec2(t * 0.18, -t * 0.15);
             vec2 uvB = xz * 18.0 + vec2(-t * 0.32, t * 0.26) + vec2(4.7, 1.9);
-            float sparkle = fbm3(uvA) * 0.65 + fbm3(uvB) * 0.35;
+            float sparkle = fbm3Water(uvA) * 0.65 + fbm3Water(uvB) * 0.35;
             return smoothstep(0.64, 0.90, sparkle);
         }
 
@@ -722,10 +843,10 @@ unsigned int createWaterProgram() {
             vec2 uvA = xz * sc + vec2( t*0.055,  t*0.038);
             vec2 uvB = xz * sc * 0.72 + vec2(-t*0.032, t*0.060);
             float eps = 0.12;
-            float hAx = fbm3(uvA+vec2(eps,0)) - fbm3(uvA-vec2(eps,0));
-            float hAz = fbm3(uvA+vec2(0,eps)) - fbm3(uvA-vec2(0,eps));
-            float hBx = fbm3(uvB+vec2(eps,0)) - fbm3(uvB-vec2(eps,0));
-            float hBz = fbm3(uvB+vec2(0,eps)) - fbm3(uvB-vec2(0,eps));
+            float hAx = fbm3Water(uvA+vec2(eps,0)) - fbm3Water(uvA-vec2(eps,0));
+            float hAz = fbm3Water(uvA+vec2(0,eps)) - fbm3Water(uvA-vec2(0,eps));
+            float hBx = fbm3Water(uvB+vec2(eps,0)) - fbm3Water(uvB-vec2(eps,0));
+            float hBz = fbm3Water(uvB+vec2(0,eps)) - fbm3Water(uvB-vec2(0,eps));
             vec3 bA = vec3(-hAx*0.28, 1.0, -hAz*0.28);
             vec3 bB = vec3(-hBx*0.18, 1.0, -hBz*0.18);
             vec3 bump = normalize(bA + bB);
@@ -740,15 +861,15 @@ unsigned int createWaterProgram() {
         float foamMask(vec2 xz, float t, float steepFoam) {
             // Sheet: slow wide cells (whitecap patches)
             vec2 uv1 = xz * 0.30 + vec2( t*0.028, -t*0.022);
-            float sheet = smoothstep(0.64, 0.86, fbm5(uv1));
+            float sheet = smoothstep(0.64, 0.86, fbm5Water(uv1));
 
             // Streak: faster, narrower tendrils trailing from crests
             vec2 uv2 = xz * 0.55 + vec2(-t*0.040,  t*0.036);
-            float streak = smoothstep(0.60, 0.82, fbm5(uv2 + vec2(2.4, 4.1)));
+            float streak = smoothstep(0.60, 0.82, fbm5Water(uv2 + vec2(2.4, 4.1)));
 
             // Fine: high-frequency salt-and-pepper at crest tips
             vec2 uv3 = xz * 1.20 + vec2( t*0.070, -t*0.065);
-            float fine = smoothstep(0.66, 0.86, fbm3(uv3 + vec2(7.3, 1.9)));
+            float fine = smoothstep(0.66, 0.86, fbm3Water(uv3 + vec2(7.3, 1.9)));
 
             // Crest-driven base foam
             float base  = steepFoam * (0.12 + 0.34 * sheet * streak);
@@ -860,6 +981,11 @@ unsigned int createWaterProgram() {
             // Opacity: foam patches are nearly opaque; open water uses uWaterOpacity
             float opacity = mix(uWaterOpacity, 0.98, foamAlpha * 0.55);
             opacity       = max(opacity, 0.35 + fresnel * 0.45);
+
+            float fogSpan = max(uFogFar - uFogNear, 0.001);
+            float fogT = clamp((distance(vWorldPos, uCameraPos) - uFogNear) / fogSpan, 0.0, 1.0);
+            float fogAmount = pow(fogT, 1.30) * clamp(uFogStrength, 0.0, 1.0);
+            waterCol = mix(waterCol, uFogColor, fogAmount);
 
             fragColor = vec4(waterCol, opacity);
         }
@@ -1216,7 +1342,7 @@ unsigned int createUnderwaterProgram() {
             return mix(mix(hash21(i),           hash21(i + vec2(1,0)), f.x),
                        mix(hash21(i + vec2(0,1)), hash21(i + vec2(1,1)), f.x), f.y);
         }
-        float fbm3(vec2 p) {
+        float fbm3Water(vec2 p) {
             return vnoise(p)*0.500
                  + vnoise(p*2.10 + 1.70)*0.250
                  + vnoise(p*4.20 + 3.10)*0.125;
@@ -1227,7 +1353,7 @@ unsigned int createUnderwaterProgram() {
             vec2 perpDir = vec2(-dir.y, dir.x);
             float across = dot(rel, perpDir);
             float beamBands = sin(along * 18.0 - t * 0.90) * 0.5 + 0.5;
-            float beamNoise = fbm3(vec2(along * 3.2, across * 9.0) + vec2(0.0, t * 0.12));
+            float beamNoise = fbm3Water(vec2(along * 3.2, across * 9.0) + vec2(0.0, t * 0.12));
             float shaft = smoothstep(0.22, 0.02, abs(across))
                         * smoothstep(-0.08, 0.18, along)
                         * smoothstep(1.15, 0.20, along)
@@ -1264,9 +1390,9 @@ unsigned int createUnderwaterProgram() {
             // Fade caustics away as camera descends deeper
             float causticStr = clamp(1.0 - depth * 0.28, 0.0, 1.0);
             vec2 cuv = vUv * 2.80;
-            float cA = fbm3(cuv + vec2( t * 0.18,  t * 0.12));
-            float cB = fbm3(cuv + vec2(-t * 0.12,  t * 0.16) + vec2(3.4, 1.2));
-            float cC = fbm3(cuv * 0.72 + vec2( t * 0.08, -t * 0.09) + vec2(7.1, 5.4));
+            float cA = fbm3Water(cuv + vec2( t * 0.18,  t * 0.12));
+            float cB = fbm3Water(cuv + vec2(-t * 0.12,  t * 0.16) + vec2(3.4, 1.2));
+            float cC = fbm3Water(cuv * 0.72 + vec2( t * 0.08, -t * 0.09) + vec2(7.1, 5.4));
             float caustic = smoothstep(0.74, 0.96, (cA + cB) * 0.50 + cC * 0.25)
                           * causticStr * 0.30;
 
@@ -1583,6 +1709,11 @@ void Renderer::setEnvironmentSettings(const EnvironmentSettings& settings) {
     m_environmentSettings.waterSunStrength = glm::clamp(m_environmentSettings.waterSunStrength, 0.0f, 6.0f);
     m_environmentSettings.sunHeatStrength = glm::clamp(m_environmentSettings.sunHeatStrength, 0.0f, 3.0f);
     m_environmentSettings.dustAmount = glm::clamp(m_environmentSettings.dustAmount, 0.0f, 1.5f);
+    m_environmentSettings.sunRayStrength = glm::clamp(m_environmentSettings.sunRayStrength, 0.0f, 2.5f);
+    m_environmentSettings.lensFlareStrength = glm::clamp(m_environmentSettings.lensFlareStrength, 0.0f, 2.5f);
+    m_environmentSettings.fogNear = glm::clamp(m_environmentSettings.fogNear, 1.0f, 500.0f);
+    m_environmentSettings.fogFar = glm::clamp(m_environmentSettings.fogFar, m_environmentSettings.fogNear + 1.0f, 900.0f);
+    m_environmentSettings.fogStrength = glm::clamp(m_environmentSettings.fogStrength, 0.0f, 1.0f);
     m_environmentSettings.terrainSize = glm::clamp(m_environmentSettings.terrainSize, 20.0f, 4000.0f);
     m_environmentSettings.terrainHeight = glm::clamp(m_environmentSettings.terrainHeight, -20.0f, 20.0f);
     m_environmentSettings.terrainPatchScale = glm::clamp(m_environmentSettings.terrainPatchScale, 0.01f, 4.0f);
@@ -1717,6 +1848,8 @@ void Renderer::render(const ViewControls& viewControls) {
         const int skySunHeatLoc = glGetUniformLocation(m_skydomeProgram, "uSunHeatStrength");
         const int skyDustAmountLoc = glGetUniformLocation(m_skydomeProgram, "uDustAmount");
         const int skyDustColorLoc = glGetUniformLocation(m_skydomeProgram, "uDustColor");
+        const int skySunRayStrengthLoc = glGetUniformLocation(m_skydomeProgram, "uSunRayStrength");
+        const int skyLensFlareStrengthLoc = glGetUniformLocation(m_skydomeProgram, "uLensFlareStrength");
         const int skyTimeLoc = glGetUniformLocation(m_skydomeProgram, "uTime");
         const int skyTexLoc = glGetUniformLocation(m_skydomeProgram, "uSkyTex");
         const int skyUseTexLoc = glGetUniformLocation(m_skydomeProgram, "uUseTexture");
@@ -1733,6 +1866,8 @@ void Renderer::render(const ViewControls& viewControls) {
         glUniform1f(skySunHeatLoc, m_environmentSettings.sunHeatStrength);
         glUniform1f(skyDustAmountLoc, m_environmentSettings.dustAmount);
         glUniform3f(skyDustColorLoc, m_environmentSettings.dustColor.r, m_environmentSettings.dustColor.g, m_environmentSettings.dustColor.b);
+        glUniform1f(skySunRayStrengthLoc, m_environmentSettings.sunRayStrength);
+        glUniform1f(skyLensFlareStrengthLoc, m_environmentSettings.lensFlareStrength);
         glUniform1f(skyTimeLoc, elapsedSeconds);
         glUniform1i(skyTexLoc, 0);
         glUniform1i(skyUseTexLoc, m_hasSkydomeTexture ? 1 : 0);
@@ -1773,6 +1908,11 @@ void Renderer::render(const ViewControls& viewControls) {
         const int terrainShadowMinorRadiusLoc = glGetUniformLocation(m_terrainProgram, "uShadowMinorRadius");
         const int terrainShadowStrengthLoc = glGetUniformLocation(m_terrainProgram, "uShadowStrength");
         const int terrainShadowSoftnessLoc = glGetUniformLocation(m_terrainProgram, "uShadowSoftness");
+        const int terrainCameraPosLoc = glGetUniformLocation(m_terrainProgram, "uCameraPos");
+        const int terrainFogColorLoc = glGetUniformLocation(m_terrainProgram, "uFogColor");
+        const int terrainFogNearLoc = glGetUniformLocation(m_terrainProgram, "uFogNear");
+        const int terrainFogFarLoc = glGetUniformLocation(m_terrainProgram, "uFogFar");
+        const int terrainFogStrengthLoc = glGetUniformLocation(m_terrainProgram, "uFogStrength");
         glUniformMatrix4fv(terrainMvpLoc, 1, GL_FALSE, glm::value_ptr(terrainMvp));
         glUniformMatrix4fv(terrainModelLoc, 1, GL_FALSE, glm::value_ptr(terrainWorldModel));
         glUniform3f(terrainBaseALoc, m_environmentSettings.terrainColorA.r, m_environmentSettings.terrainColorA.g, m_environmentSettings.terrainColorA.b);
@@ -1782,6 +1922,11 @@ void Renderer::render(const ViewControls& viewControls) {
         glUniform3f(terrainLightDirLoc, m_environmentSettings.terrainLightDirection.r, m_environmentSettings.terrainLightDirection.g, m_environmentSettings.terrainLightDirection.b);
         glUniform1i(terrainTexLoc, 1);
         glUniform1i(terrainUseTexLoc, m_hasTerrainTexture ? 1 : 0);
+        glUniform3f(terrainCameraPosLoc, cameraPos.x, cameraPos.y, cameraPos.z);
+        glUniform3f(terrainFogColorLoc, m_environmentSettings.fogColor.r, m_environmentSettings.fogColor.g, m_environmentSettings.fogColor.b);
+        glUniform1f(terrainFogNearLoc, m_environmentSettings.fogNear);
+        glUniform1f(terrainFogFarLoc, m_environmentSettings.fogFar);
+        glUniform1f(terrainFogStrengthLoc, m_environmentSettings.enableFog ? m_environmentSettings.fogStrength : 0.0f);
 
         const bool hasImportShadow = (m_importVao != 0 && m_importIndexCount > 0);
         if (hasImportShadow) {
@@ -1802,13 +1947,39 @@ void Renderer::render(const ViewControls& viewControls) {
             const float halfX = scaledDimensions.x * 0.5f;
             const float halfY = scaledDimensions.y * 0.5f;
             const float halfZ = scaledDimensions.z * 0.5f;
-            const float alongExtent = std::abs(glm::dot(axisX, shadowDir)) * halfX + std::abs(glm::dot(axisZ, shadowDir)) * halfZ;
-            const float acrossExtent = std::abs(glm::dot(axisX, shadowPerp)) * halfX + std::abs(glm::dot(axisZ, shadowPerp)) * halfZ;
-            const float sunY = std::max(lightN.y, 0.08f);
-            const float castLength = (halfY / sunY) * 0.85f;
-            const glm::vec2 centerXZ = glm::vec2(m_importPosition.x, m_importPosition.z) + shadowDir * (castLength * 0.55f);
-            const float majorRadius = alongExtent + castLength + 0.18f;
-            const float minorRadius = acrossExtent * 0.95f + 0.16f;
+
+            // Project all 8 OBB corners onto the ground plane (y=0) along the sun ray direction.
+            // Shadow displacement per unit of world-Y: shift_along_shadowDir = y * |lightXZ| / lightY
+            const float sunXZLen = glm::length(glm::vec2(lightN.x, lightN.z));
+            const float invLightY = 1.0f / std::max(lightN.y, 0.06f);
+            const float shiftPerY = sunXZLen * invLightY; // world-space shift along shadowDir per unit height
+
+            float shadowAlongMin =  1e9f, shadowAlongMax = -1e9f;
+            float shadowPerpMin  =  1e9f, shadowPerpMax  = -1e9f;
+            for (int sx : {-1, 1}) {
+                for (int sy : {-1, 1}) {
+                    for (int sz : {-1, 1}) {
+                        glm::vec2 cornerXZ = glm::vec2(m_importPosition.x, m_importPosition.z)
+                            + axisX * (sx * halfX)
+                            + axisZ * (sz * halfZ);
+                        // Clamp cornerY to 0 — underground parts don't cast shadow
+                        const float cornerY = std::max(0.0f, m_importPosition.y + sy * halfY);
+                        // Project onto ground: shadow moves along shadowDir by cornerY * shiftPerY
+                        const float projAlong = glm::dot(cornerXZ, shadowDir) + cornerY * shiftPerY;
+                        const float projPerp  = glm::dot(cornerXZ, shadowPerp);
+                        shadowAlongMin = std::min(shadowAlongMin, projAlong);
+                        shadowAlongMax = std::max(shadowAlongMax, projAlong);
+                        shadowPerpMin  = std::min(shadowPerpMin,  projPerp);
+                        shadowPerpMax  = std::max(shadowPerpMax,  projPerp);
+                    }
+                }
+            }
+
+            const float centerAlong = (shadowAlongMin + shadowAlongMax) * 0.5f;
+            const float centerPerp  = (shadowPerpMin  + shadowPerpMax)  * 0.5f;
+            const glm::vec2 centerXZ = shadowDir * centerAlong + shadowPerp * centerPerp;
+            const float majorRadius  = (shadowAlongMax - shadowAlongMin) * 0.5f;
+            const float minorRadius  = (shadowPerpMax  - shadowPerpMin)  * 0.5f;
             const float shadowStrength = glm::clamp(0.34f + heightFactor * 0.25f, 0.22f, 0.62f);
 
             glUniform1i(terrainShadowEnabledLoc, 1);
@@ -1857,6 +2028,10 @@ void Renderer::render(const ViewControls& viewControls) {
         glUniform3f(glGetUniformLocation(m_waterProgram, "uLightDir"),          m_environmentSettings.terrainLightDirection.x, m_environmentSettings.terrainLightDirection.y, m_environmentSettings.terrainLightDirection.z);
         glUniform1f(glGetUniformLocation(m_waterProgram, "uSunIntensity"),      m_environmentSettings.enableSun ? (m_environmentSettings.sunIntensity * m_environmentSettings.waterSunStrength) : 0.0f);
         glUniform3f(glGetUniformLocation(m_waterProgram, "uSunColor"),          m_environmentSettings.sunColor.r, m_environmentSettings.sunColor.g, m_environmentSettings.sunColor.b);
+        glUniform3f(glGetUniformLocation(m_waterProgram, "uFogColor"),          m_environmentSettings.fogColor.r, m_environmentSettings.fogColor.g, m_environmentSettings.fogColor.b);
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uFogNear"),           m_environmentSettings.fogNear);
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uFogFar"),            m_environmentSettings.fogFar);
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uFogStrength"),       m_environmentSettings.enableFog ? m_environmentSettings.fogStrength : 0.0f);
 
         float interactionAmount = 0.0f;
         float interactionRadius = 0.0f;
@@ -1932,6 +2107,11 @@ void Renderer::render(const ViewControls& viewControls) {
         const int waterEnabledLocT = glGetUniformLocation(m_texturedProgram, "uWaterEnabled");
         const int waterLevelLocT = glGetUniformLocation(m_texturedProgram, "uWaterLevel");
         const int waterTintLocT = glGetUniformLocation(m_texturedProgram, "uWaterTint");
+        const int cameraPosLocT = glGetUniformLocation(m_texturedProgram, "uCameraPos");
+        const int fogColorLocT = glGetUniformLocation(m_texturedProgram, "uFogColor");
+        const int fogNearLocT = glGetUniformLocation(m_texturedProgram, "uFogNear");
+        const int fogFarLocT = glGetUniformLocation(m_texturedProgram, "uFogFar");
+        const int fogStrengthLocT = glGetUniformLocation(m_texturedProgram, "uFogStrength");
 
         glm::mat4 model(1.0f);
         model = glm::translate(model, m_importPosition);
@@ -1959,6 +2139,11 @@ void Renderer::render(const ViewControls& viewControls) {
         glUniform1i(waterEnabledLocT, m_environmentSettings.enableWater ? 1 : 0);
         glUniform1f(waterLevelLocT, m_environmentSettings.waterLevel);
         glUniform3f(waterTintLocT, 0.10f, 0.42f, 0.52f);
+        glUniform3f(cameraPosLocT, cameraPos.x, cameraPos.y, cameraPos.z);
+        glUniform3f(fogColorLocT, m_environmentSettings.fogColor.r, m_environmentSettings.fogColor.g, m_environmentSettings.fogColor.b);
+        glUniform1f(fogNearLocT, m_environmentSettings.fogNear);
+        glUniform1f(fogFarLocT, m_environmentSettings.fogFar);
+        glUniform1f(fogStrengthLocT, m_environmentSettings.enableFog ? m_environmentSettings.fogStrength : 0.0f);
 
         if (m_importAlphaBlend) {
             glEnable(GL_BLEND);

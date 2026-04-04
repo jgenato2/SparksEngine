@@ -78,6 +78,14 @@ struct EnvironmentSettings {
     float sunHeatStrength{0.35f};
     float dustAmount{0.16f};
     glm::vec3 dustColor{0.92f, 0.80f, 0.62f};
+    float sunRayStrength{1.18f};
+    float lensFlareStrength{0.92f};
+
+    bool enableFog{true};
+    glm::vec3 fogColor{0.67f, 0.75f, 0.83f};
+    float fogNear{14.0f};
+    float fogFar{120.0f};
+    float fogStrength{0.52f};
 
     bool enableTerrain{true};
     float terrainSize{220.0f};
@@ -95,7 +103,7 @@ struct EnvironmentSettings {
     bool enableWater{false};
     float waterLevel{0.0f};
     glm::vec3 waterColor{0.10f, 0.36f, 0.54f};
-    float waterOpacity{0.65f};
+    float waterOpacity{0.42f};
     float waveAmplitude{0.18f};
     float waveFrequency{2.0f};
 
