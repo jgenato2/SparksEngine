@@ -13,7 +13,11 @@ namespace sparks::render {
 
 struct ViewControls {
     float zoomDistance{4.0f};
+    float zoomTargetDistance{4.0f};
     glm::vec2 panOffset{0.0f, 0.0f};
+    glm::vec2 panTargetOffset{0.0f, 0.0f};
+    float orbitTargetZ{0.0f};
+    float orbitTargetZTarget{0.0f};
     glm::vec2 worldRotationDegrees{0.0f, 0.0f};
 };
 
@@ -45,11 +49,11 @@ struct CloudObjectSettings {
     float softness{0.82f};
     float detail{1.0f};
     float planeFade{0.90f};
-    int planeCount{12};
+    int planeCount{1};
     float cubeSpread{1.0f};
     float glowStrength{0.50f};
     float motionSpeed{1.0f};
-    int cloudType{0}; // 0: Cumulus, 1: Stratus, 2: Cirrus
+    int cloudType{0}; // 0: Cumulus, 1: Stratus, 2: Cirrus, 3: Mares Tail
     std::uint32_t planeSelectionSeed{1u};
 };
 
@@ -142,9 +146,8 @@ private:
     unsigned int m_cloudProgram{0};
     unsigned int m_cloudVao{0};
     unsigned int m_cloudVbo{0};
-    unsigned int m_cloudEbo{0};
+    unsigned int m_cloudSortedEbo{0};
     int m_cloudIndexCount{0};
-    std::vector<glm::vec3> m_cloudCardCenters{};
     int m_cloudMvpLoc{-1};
     int m_cloudModelLoc{-1};
     int m_cloudColorLoc{-1};

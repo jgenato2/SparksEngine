@@ -12,9 +12,6 @@
 
 namespace sparks::core::import_util {
 
-constexpr float kMinCameraZoom = 1.5f;
-constexpr float kMaxCameraZoom = 250.0f;
-
 std::string formatVec3(const glm::vec3& value) {
     char buffer[96];
     std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", value.x, value.y, value.z);
@@ -24,17 +21,6 @@ std::string formatVec3(const glm::vec3& value) {
 glm::vec3 importedModelWorldDimensions(const render::ImportedModelData& model) {
     const glm::vec3 scaled = model.dimensions * model.scale;
     return glm::vec3(std::abs(scaled.x), std::abs(scaled.y), std::abs(scaled.z));
-}
-
-float importedModelFocusZoom(const render::ImportedModelData& model) {
-    const glm::vec3 dims = importedModelWorldDimensions(model);
-    const glm::vec3 extent(
-        std::max(dims.x, 1.0f),
-        std::max(dims.y, 1.0f),
-        std::max(dims.z, 1.0f));
-    const float radius = std::max({extent.x, extent.y, extent.z}) * 0.5f;
-    const float depth = std::abs(model.position.z) + radius;
-    return std::clamp(depth * 2.5f, kMinCameraZoom, kMaxCameraZoom);
 }
 
 void applyImportedRigState(
@@ -53,6 +39,7 @@ void applyImportedRigState(
     bool& rigHasUnsavedChanges,
     std::vector<rigging::VertexGroupInfo>& rigVertexGroups,
     int& selectedVertexGroup) {
+    (void)viewControls;
     importedModel = importedModelData;
     importedModelSelected = true;
     if (!importedRigBones.empty()) {
@@ -67,8 +54,6 @@ void applyImportedRigState(
     rigVertexGroups = importedVertexGroups;
     selectedVertexGroup = rigVertexGroups.empty() ? -1 : 0;
     renderer.setImportedModel(importedModelData);
-    viewControls.panOffset = glm::vec2(importedModelData.position.x, importedModelData.position.y);
-    viewControls.zoomDistance = importedModelFocusZoom(importedModelData);
 }
 
 void importFbxFromDialog(

@@ -42,7 +42,7 @@ std::uint32_t randomCloudPlaneSeed() {
 }
 
 void applyCloudTypePreset(render::CloudObjectSettings& cloud, const int cloudType) {
-    cloud.cloudType = std::clamp(cloudType, 0, 2);
+    cloud.cloudType = std::clamp(cloudType, 0, 3);
 
     const float horizontalSpan = std::max(std::max(std::abs(cloud.scale.x), std::abs(cloud.scale.z)), 1.0f);
     if (cloud.cloudType == 0) {
@@ -52,7 +52,7 @@ void applyCloudTypePreset(render::CloudObjectSettings& cloud, const int cloudTyp
         cloud.motionSpeed = 1.8f;
         cloud.glowStrength = 0.34f;
         cloud.planeFade = 0.92f;
-        cloud.planeCount = 14;
+        cloud.planeCount = 1;
         cloud.cubeSpread = 1.00f;
         cloud.scale.y = std::clamp(horizontalSpan * 0.50f, 0.75f, 8.0f);
         cloud.color = glm::vec3(0.93f, 0.96f, 1.0f);
@@ -63,21 +63,33 @@ void applyCloudTypePreset(render::CloudObjectSettings& cloud, const int cloudTyp
         cloud.motionSpeed = 0.70f;
         cloud.glowStrength = 0.14f;
         cloud.planeFade = 0.98f;
-        cloud.planeCount = 18;
+        cloud.planeCount = 1;
         cloud.cubeSpread = 1.42f;
         cloud.scale.y = std::clamp(horizontalSpan * 0.22f, 0.35f, 3.5f);
         cloud.color = glm::vec3(0.85f, 0.91f, 0.98f);
-    } else {
+    } else if (cloud.cloudType == 2) {
         cloud.opacity = 0.54f;
         cloud.softness = 0.95f;
         cloud.detail = 3.0f;
         cloud.motionSpeed = 3.25f;
         cloud.glowStrength = 0.18f;
         cloud.planeFade = 0.96f;
-        cloud.planeCount = 10;
+        cloud.planeCount = 1;
         cloud.cubeSpread = 1.88f;
         cloud.scale.y = std::clamp(horizontalSpan * 0.14f, 0.20f, 2.2f);
         cloud.color = glm::vec3(0.90f, 0.96f, 1.0f);
+    } else {
+        // Wispy high-altitude streaks, similar to mare's-tail cirrus.
+        cloud.opacity = 0.42f;
+        cloud.softness = 0.97f;
+        cloud.detail = 3.8f;
+        cloud.motionSpeed = 2.6f;
+        cloud.glowStrength = 0.10f;
+        cloud.planeFade = 0.98f;
+        cloud.planeCount = 1;
+        cloud.cubeSpread = 2.05f;
+        cloud.scale.y = std::clamp(horizontalSpan * 0.10f, 0.14f, 1.4f);
+        cloud.color = glm::vec3(0.90f, 0.95f, 1.0f);
     }
 }
 
@@ -156,9 +168,17 @@ void drawSceneTab(
 
     const bool viewportHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 
-    if (viewportHovered && io.MouseWheel != 0.0f) {
-        viewControls.zoomDistance = std::clamp(viewControls.zoomDistance - io.MouseWheel * 0.35f, kMinCameraZoom, kMaxCameraZoom);
-    }
+    // Smoothly converge current zoom toward target zoom (Blender-like non-instant dolly feel).
+    const float zoomFollowT = 1.0f - std::exp(-10.0f * io.DeltaTime);
+    viewControls.zoomDistance = std::clamp(
+        glm::mix(viewControls.zoomDistance, viewControls.zoomTargetDistance, zoomFollowT),
+        kMinCameraZoom,
+        kMaxCameraZoom);
+
+    // Smooth focus transitions (used by Z focus) for pivot X/Y and Z.
+    const float focusFollowT = 1.0f - std::exp(-12.0f * io.DeltaTime);
+    viewControls.panOffset = glm::mix(viewControls.panOffset, viewControls.panTargetOffset, focusFollowT);
+    viewControls.orbitTargetZ = glm::mix(viewControls.orbitTargetZ, viewControls.orbitTargetZTarget, focusFollowT);
 
     if (viewportHovered && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         viewControls.worldRotationDegrees.x = std::clamp(
@@ -172,6 +192,7 @@ void drawSceneTab(
         const float panSpeed = 0.004f * viewControls.zoomDistance;
         viewControls.panOffset.x -= io.MouseDelta.x * panSpeed;
         viewControls.panOffset.y += io.MouseDelta.y * panSpeed;
+        viewControls.panTargetOffset = viewControls.panOffset;
     }
 
     const ImVec2 viewportSize = ImGui::GetContentRegionAvail();
@@ -192,9 +213,17 @@ void drawSceneTab(
     const bool sceneImageHovered = ImGui::IsItemHovered();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
 
+    if (sceneImageHovered && io.MouseWheel != 0.0f) {
+        const float zoomFactor = std::pow(0.85f, io.MouseWheel);
+        viewControls.zoomTargetDistance = std::clamp(
+            viewControls.zoomTargetDistance * zoomFactor,
+            kMinCameraZoom,
+            kMaxCameraZoom);
+    }
+
     const float aspectRatio = static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight);
-    const glm::vec3 cameraTarget(viewControls.panOffset.x, viewControls.panOffset.y, 0.0f);
-    const glm::vec3 cameraPos(cameraTarget.x, cameraTarget.y, viewControls.zoomDistance);
+    const glm::vec3 cameraTarget(viewControls.panOffset.x, viewControls.panOffset.y, viewControls.orbitTargetZ);
+    const glm::vec3 cameraPos(cameraTarget.x, cameraTarget.y, cameraTarget.z + viewControls.zoomDistance);
     const glm::mat4 view = glm::lookAt(
         cameraPos,
         cameraTarget,
@@ -202,8 +231,10 @@ void drawSceneTab(
     const glm::mat4 projection = glm::perspective(glm::radians(50.0f), aspectRatio, 0.1f, kCameraFarPlane);
 
     glm::mat4 world(1.0f);
+    world = glm::translate(world, cameraTarget);
     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
+    world = glm::translate(world, -cameraTarget);
     const glm::vec3 viewRotateAxis = glm::normalize(glm::vec3(glm::inverse(world) * glm::vec4(0.0f, 0.0f, 1.0f, 0.0f)));
 
     auto computeImportedScreenBounds = [&](const render::ImportedModelData& modelData, ImVec2& outMin, ImVec2& outMax) {
@@ -1503,7 +1534,7 @@ void drawRightPane(
         cloudChanged |= ImGui::DragFloat3("Rotation", &cloud.rotationEulerDegrees.x, 0.5f, -180.0f, 180.0f, "%.1f deg");
         cloudChanged |= ImGui::DragFloat3("Scale", &cloud.scale.x, 0.03f, 0.05f, 20.0f, "%.2f");
         int cloudType = cloud.cloudType;
-        if (ImGui::Combo("Cloud Type", &cloudType, "Cumulus\0Stratus\0Cirrus\0")) {
+        if (ImGui::Combo("Cloud Type", &cloudType, "Cumulus\0Stratus\0Cirrus\0Mares Tail\0")) {
             applyCloudTypePreset(cloud, cloudType);
             cloudChanged = true;
         }
@@ -1514,10 +1545,8 @@ void drawRightPane(
         cloudChanged |= ImGui::SliderFloat("Motion Speed", &cloud.motionSpeed, 0.0f, 8.0f, "%.2f");
         cloudChanged |= ImGui::SliderFloat("Glow", &cloud.glowStrength, 0.0f, 1.0f, "%.2f");
         cloudChanged |= ImGui::SliderFloat("Plane Fade", &cloud.planeFade, 0.0f, 1.0f, "%.2f");
-        if (ImGui::SliderInt("Plane Count", &cloud.planeCount, 1, 28)) {
-            cloud.planeSelectionSeed = randomCloudPlaneSeed();
-            cloudChanged = true;
-        }
+        cloud.planeCount = 1;
+        ImGui::TextDisabled("Plane Count: 1 (single-plane cloud mode)");
         cloudChanged |= ImGui::SliderFloat("Cube Spread", &cloud.cubeSpread, 0.35f, 2.50f, "%.2f");
 
         if (cloudChanged) {
@@ -1543,7 +1572,7 @@ void drawRightPane(
 
             // Appearance controls apply to all selected clouds
             int sharedType = refCloud.cloudType;
-            if (ImGui::Combo("Cloud Type", &sharedType, "Cumulus\0Stratus\0Cirrus\0")) {
+            if (ImGui::Combo("Cloud Type", &sharedType, "Cumulus\0Stratus\0Cirrus\0Mares Tail\0")) {
                 for (const int idx : selectedCloudIndices) {
                     if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
                         applyCloudTypePreset(environmentSettings.cloudObjects[idx], sharedType);
@@ -1607,15 +1636,8 @@ void drawRightPane(
                 }
                 cloudChanged = true;
             }
-            if (ImGui::SliderInt("Plane Count", &refCloud.planeCount, 1, 28)) {
-                for (const int idx : selectedCloudIndices) {
-                    if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
-                        environmentSettings.cloudObjects[idx].planeCount = refCloud.planeCount;
-                        environmentSettings.cloudObjects[idx].planeSelectionSeed = randomCloudPlaneSeed();
-                    }
-                }
-                cloudChanged = true;
-            }
+            refCloud.planeCount = 1;
+            ImGui::TextDisabled("Plane Count: 1 (single-plane cloud mode)");
             if (ImGui::SliderFloat("Cube Spread", &refCloud.cubeSpread, 0.35f, 2.50f, "%.2f")) {
                 for (const int idx : selectedCloudIndices) {
                     if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {

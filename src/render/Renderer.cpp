@@ -496,96 +496,65 @@ unsigned int createCloudProgram() {
         }
 
         void main() {
-            int cloudType = clamp(uCloudType, 0, 2);
+            int cloudType = clamp(uCloudType, 0, 3);
             float softness = clamp(uCloudSoftness, 0.2, 0.98);
             float detail = clamp(uCloudDetail, 0.3, 4.5);
             float detailAmount = clamp((detail - 0.3) / 4.2, 0.0, 1.0);
             float motionSpeed = clamp(uCloudMotionSpeed, 0.0, 8.0);
-            float motionGain = motionSpeed * (0.65 + motionSpeed * 0.60);
+            float t = uTime * (0.06 + motionSpeed * 0.24);
+
+            vec2 uv = vCardUv;
+            vec2 stretch = vec2(0.94, 1.06);
             if (cloudType == 1) {
-                motionGain *= 0.78;
+                stretch = vec2(1.20, 0.86);
             } else if (cloudType == 2) {
-                motionGain *= 1.35;
+                stretch = vec2(0.76, 1.32);
+            } else if (cloudType == 3) {
+                stretch = vec2(1.85, 0.58);
             }
 
-            // Non-spherical anisotropic core shape.
-            vec3 q = vec3(vLocalPos.x * 0.72, vLocalPos.y * 1.72, vLocalPos.z * 0.84);
-            if (cloudType == 1) {
-                q = vec3(vLocalPos.x * 0.92, vLocalPos.y * 2.65, vLocalPos.z * 0.92);
-            } else if (cloudType == 2) {
-                q = vec3(vLocalPos.x * 0.62, vLocalPos.y * 3.35, vLocalPos.z * 1.36);
-            }
-            float radial = length(q);
+            vec2 uvShaped = uv * stretch;
+            float radius = length(uvShaped);
+            float core = exp(-radius * radius * 1.40);
 
-            // Make softness highly responsive: low softness = hard puff, high softness = airy edge.
-            float edgeStart = mix(0.32, 0.86, softness);
-            if (cloudType == 1) {
-                edgeStart = mix(0.42, 0.94, softness);
-            } else if (cloudType == 2) {
-                edgeStart = mix(0.26, 0.82, softness);
-            }
-            float baseShape = 1.0 - smoothstep(edgeStart, 1.0, radial);
+            // Lumpy cloud silhouette made from overlapping soft lobes.
+            float lobeA = exp(-length((uv - vec2(-0.34, 0.02)) * vec2(1.18, 0.98)) * 2.9);
+            float lobeB = exp(-length((uv - vec2( 0.30, 0.08)) * vec2(1.24, 1.08)) * 3.0);
+            float lobeC = exp(-length((uv - vec2( 0.00,-0.24)) * vec2(0.96, 1.30)) * 2.8);
+            float lobeD = exp(-length((uv - vec2( 0.02, 0.34)) * vec2(1.08, 1.38)) * 3.2);
+            float silhouetteBase = core * 0.70 + (lobeA + lobeB + lobeC + lobeD) * 0.42;
 
-            // Randomize each card's local mask so repeated card structure is harder to perceive.
-            float cardNoise = hash12(vec2(vCardId * 1.37, vCardId * 2.11));
-            float cardAngle = (cardNoise - 0.5) * 1.2;
-            vec2 cardUv = rotate2(vCardUv, cardAngle);
-            vec2 cardScale = mix(vec2(0.82, 1.18), vec2(1.18, 0.84), cardNoise);
-
-            // Feather card edges smoothly to avoid a visible circular rim.
-            float uvRadius = length(cardUv * cardScale);
-            float cardFeatherStart = mix(0.66, 0.74, cardNoise);
-            float cardFeatherEnd = mix(1.02, 1.10, cardNoise);
-            float cardEdgeFade = 1.0 - smoothstep(cardFeatherStart, cardFeatherEnd, uvRadius);
-            cardEdgeFade = pow(max(cardEdgeFade, 0.0), 1.35);
-
-            float verticalFade = 1.0 - smoothstep(0.55, 1.0, abs(vLocalPos.y));
-            float t = uTime * 0.17 * motionGain;
-
-            // Soft radial blob profile similar to the reference image.
-            float sigma = mix(0.62, 0.36, softness);
-            float gaussian = exp(-((uvRadius * uvRadius) / max(2.0 * sigma * sigma, 0.02)));
-            float radialBlob = smoothstep(0.02, 0.92, gaussian);
-
-            // Keep detail inside the card center so it never reaches borders.
-            float detailInteriorMask = 1.0 - smoothstep(0.18, 0.68, uvRadius);
-            vec3 windDrift = vec3(t * 10.5, sin(t * 0.8 + vCardId * 0.61) * 0.9, t * 5.2);
-            float warpA = fbmFast(vec3(cardUv * 2.1 + vec2(t * 0.75, -t * 0.28), vCardId * 0.19));
-            float warpB = valueNoise3(vec3(cardUv * 4.4 + vec2(-t * 1.15, t * 0.86), 3.1 + vCardId * 0.41));
-            vec3 domainWarp = vec3((warpA - 0.5) * 1.15, (warpB - 0.5) * 0.55, (warpA - warpB) * 0.95) * detailAmount;
-            vec3 domain = (vWorldPos + windDrift + domainWarp) * (0.05 + detail * 0.08);
-            float detailNoiseA = fbm(domain + vec3(8.3, 4.7, 2.1));
-            float detailNoiseB = fbm(domain.zxy * 1.63 + vec3(13.7 - t * 4.3, 2.8 + t * 1.5, 5.1 + t * 2.2));
-            float detailNoise = clamp(mix(detailNoiseA, detailNoiseB, 0.45), 0.0, 1.0);
-            float detailPuff = smoothstep(0.20, 0.88, detailNoise);
-            float detailContrast = mix(1.0, 1.95, detailAmount);
-            float detailBand = clamp((detailPuff - 0.5) * detailContrast + 0.5, 0.0, 1.0);
-            float detailMod = mix(1.0, mix(0.60, 1.50, detailBand), detailAmount * detailInteriorMask);
-
-            float advectionMask = clamp(
-                smoothstep(0.18, 0.84, warpA) * 0.68 +
-                smoothstep(0.22, 0.80, warpB) * 0.42,
-                0.0,
-                1.0);
-            detailMod *= mix(0.72, 1.34, advectionMask * detailAmount);
-
-            float motionPulse = mix(0.94, 1.16, smoothstep(0.26, 0.86, warpB));
-            detailMod *= mix(1.0, motionPulse, 0.58 * detailAmount);
-
-            if (cloudType == 1) {
-                // Stratus: more even density with softer breakup.
-                detailMod = mix(detailMod, 1.0, 0.28);
-            } else if (cloudType == 2) {
-                // Cirrus: emphasize wispy streaks.
-                detailMod *= mix(0.82, 1.28, smoothstep(0.38, 0.88, warpB));
+            float driftA = fbm(vec3(uv * 2.45 + vec2(t * 0.36, -t * 0.20), 1.9));
+            float driftB = fbmFast(vec3(uv * 4.10 + vec2(-t * 0.52, t * 0.31), 6.3));
+            float edgeNoise = mix(driftA, driftB, 0.60);
+            if (cloudType == 3) {
+                float streak = fbmFast(vec3(uv.x * 7.2 + t * 1.6, uv.y * 1.45 - t * 0.45, 12.3));
+                edgeNoise = mix(edgeNoise, streak, 0.78);
             }
 
-            float density = clamp(baseShape * cardEdgeFade * radialBlob * detailMod * mix(0.55, 1.0, verticalFade), 0.0, 1.0);
+            float edgeShape = silhouetteBase + (edgeNoise - 0.5) * mix(0.14, 0.30, detailAmount);
+            float edgeStart = mix(0.10, 0.22, softness);
+            if (cloudType == 3) {
+                edgeShape *= 0.93;
+                edgeStart = mix(0.22, 0.34, softness);
+            }
+            float alphaShape = smoothstep(edgeStart, 0.95, edgeShape);
+
+            float interiorMask = smoothstep(0.06, 0.70, core);
+            float puffMask = smoothstep(0.26, 0.88, driftA) * interiorMask;
+            float wispyMask = smoothstep(0.40, 0.92, driftB) * interiorMask;
+            float detailGain = mix(0.86, 1.22, puffMask) * mix(0.90, 1.18, wispyMask * detailAmount);
+            if (cloudType == 3) {
+                float filament = smoothstep(0.46, 0.93, edgeNoise);
+                detailGain *= mix(0.70, 1.24, filament);
+            }
+
+            float density = clamp(alphaShape * detailGain, 0.0, 1.0);
 
             // Opacity slider should feel direct and obvious.
             float alpha = density * pow(clamp(uCloudOpacity, 0.0, 1.0), 0.78);
 
-            // Fade edge-on cards based on geometric facing to reduce visible plane artifacts.
+            // Fade edge-on card based on geometric facing to reduce visible plane artifacts.
             vec3 faceN = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
             vec3 viewDir = normalize(uCameraWorld - vWorldPos);
             float facing = abs(dot(faceN, viewDir));
@@ -605,47 +574,45 @@ unsigned int createCloudProgram() {
                 discard;
             }
 
-            // Warm cumulus lighting: soft highlights and pocket shadows.
+            // Soft daylight lighting for fluffy white cloud look.
             vec3 lightDir = normalize(uLightDir);
-            vec3 pseudoNormal = normalize(vec3(cardUv * 0.92, sqrt(max(1.0 - dot(cardUv, cardUv), 0.001))));
+            vec3 pseudoNormal = normalize(vec3(uv * 0.82, sqrt(max(1.0 - dot(uv * 0.86, uv * 0.86), 0.001))));
             float ndl = max(dot(pseudoNormal, lightDir), 0.0);
 
-            float cavity = (1.0 - detailPuff) * detailInteriorMask;
-            float lighting = mix(0.70, 1.18, pow(ndl, 0.84));
-            lighting *= mix(1.0, 0.88, cavity * 0.75);
-
-            vec3 warmTint = mix(vec3(0.90, 0.94, 0.98), vec3(1.05, 1.08, 1.10), pow(ndl, 0.70));
-            if (cloudType == 1) {
-                warmTint = mix(vec3(0.83, 0.89, 0.97), vec3(0.99, 1.03, 1.08), pow(ndl, 0.68));
-            } else if (cloudType == 2) {
-                warmTint = mix(vec3(0.88, 0.95, 1.00), vec3(1.08, 1.12, 1.14), pow(ndl, 0.72));
+            float lighting = mix(0.74, 1.16, pow(ndl, 0.88));
+            vec3 highlightTint = mix(vec3(0.92, 0.96, 1.00), vec3(1.08, 1.10, 1.12), pow(ndl, 0.72));
+            vec3 coolShadowTint = vec3(0.70, 0.82, 0.97);
+            if (cloudType == 3) {
+                lighting = mix(0.80, 1.10, pow(ndl, 0.90));
+                highlightTint = mix(vec3(0.90, 0.95, 1.00), vec3(1.04, 1.08, 1.12), pow(ndl, 0.76));
+                coolShadowTint = vec3(0.72, 0.84, 0.98);
             }
-            vec3 coolShadowTint = vec3(0.66, 0.78, 0.94);
-            warmTint = mix(coolShadowTint, warmTint, smoothstep(0.0, 0.55, ndl));
-            float rimGeom = pow(1.0 - abs(dot(pseudoNormal, viewDir)), 3.2);
-            float backLit = pow(max(dot(-viewDir, lightDir), 0.0), 1.25);
+            vec3 cloudTint = mix(coolShadowTint, highlightTint, smoothstep(0.0, 0.70, ndl));
+
+            float rimGeom = pow(1.0 - abs(dot(pseudoNormal, viewDir)), 2.9);
+            float backLit = pow(max(dot(-viewDir, lightDir), 0.0), 1.20);
             float silverLining = rimGeom * backLit;
 
             float glow = clamp(uGlowStrength, 0.0, 1.0);
             float glowBoost = glow * glow;
             float viewRim = max(1.0 - abs(dot(pseudoNormal, viewDir)), 0.0);
 
-            // Soft bloom components tuned for bright daylight cumulus.
-            float bloomRim = pow(viewRim, 1.45);
-            float bloomBack = pow(max(dot(-viewDir, lightDir), 0.0), 1.2) * pow(viewRim, 1.15);
-            float bloomVolume = smoothstep(0.94, 0.12, uvRadius) * (0.28 + 0.52 * viewRim);
+            float bloomRim = pow(viewRim, 1.35);
+            float bloomBack = pow(max(dot(-viewDir, lightDir), 0.0), 1.16) * pow(viewRim, 1.05);
+            float bloomVolume = smoothstep(0.94, 0.12, radius) * (0.28 + 0.46 * viewRim);
 
-            vec3 color = uCloudColor * warmTint * lighting;
-            color += vec3(1.12, 1.12, 1.10) * silverLining * (0.52 + glowBoost * 1.25);
+            vec3 color = uCloudColor * cloudTint * lighting;
+            color += vec3(1.14, 1.14, 1.12) * silverLining * (0.45 + glowBoost * 1.10);
+            color += vec3(1.07, 1.08, 1.08) * pow(core, 1.7) * (0.14 + 0.26 * detailAmount);
 
             vec3 bloomTint = mix(uCloudColor, vec3(1.12, 1.15, 1.18), 0.70);
-            color += bloomTint * bloomRim * glowBoost * 1.25;
-            color += vec3(1.18, 1.20, 1.16) * bloomBack * glowBoost * 1.55;
-            color += bloomTint * bloomVolume * glowBoost * 0.95;
+            color += bloomTint * bloomRim * glowBoost * 1.10;
+            color += vec3(1.18, 1.20, 1.16) * bloomBack * glowBoost * 1.30;
+            color += bloomTint * bloomVolume * glowBoost * 0.78;
 
             // Keep dark regions sky-tinted instead of black.
             vec3 lightBlueFloor = vec3(0.63, 0.74, 0.90);
-            vec3 ambientSky = lightBlueFloor * (0.16 + 0.34 * detailInteriorMask) * (1.0 - ndl * 0.75);
+            vec3 ambientSky = lightBlueFloor * (0.16 + 0.34 * interiorMask) * (1.0 - ndl * 0.75);
             color += ambientSky;
             color = max(color, lightBlueFloor * 0.18);
 
@@ -724,11 +691,8 @@ Renderer::~Renderer() {
     if (m_cloudProgram != 0) {
         glDeleteProgram(m_cloudProgram);
     }
-    if (m_cloudEbo != 0) {
-        glDeleteBuffers(1, &m_cloudEbo);
-    }
-    if (m_cloudVbo != 0) {
-        glDeleteBuffers(1, &m_cloudVbo);
+    if (m_cloudSortedEbo != 0) {
+        glDeleteBuffers(1, &m_cloudSortedEbo);
     }
     if (m_cloudVao != 0) {
         glDeleteVertexArrays(1, &m_cloudVao);
@@ -962,8 +926,8 @@ void Renderer::render(const ViewControls& viewControls) {
     glUseProgram(m_shaderProgram);
 
     const float aspectRatio = static_cast<float>(m_viewportWidth) / static_cast<float>(m_viewportHeight);
-    const glm::vec3 cameraTarget(viewControls.panOffset.x, viewControls.panOffset.y, 0.0f);
-    const glm::vec3 cameraPos(cameraTarget.x, cameraTarget.y, viewControls.zoomDistance);
+    const glm::vec3 cameraTarget(viewControls.panOffset.x, viewControls.panOffset.y, viewControls.orbitTargetZ);
+    const glm::vec3 cameraPos(cameraTarget.x, cameraTarget.y, cameraTarget.z + viewControls.zoomDistance);
     const glm::mat4 view = glm::lookAt(
         cameraPos,
         cameraTarget,
@@ -971,8 +935,11 @@ void Renderer::render(const ViewControls& viewControls) {
     const glm::mat4 projection = glm::perspective(glm::radians(50.0f), aspectRatio, 0.1f, kCameraFarPlane);
 
     glm::mat4 world(1.0f);
+    // Orbit around the active camera target instead of always rotating around world origin.
+    world = glm::translate(world, cameraTarget);
     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
     world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
+    world = glm::translate(world, -cameraTarget);
 
     if (m_environmentSettings.enableSkydome && m_skydomeProgram != 0 && m_skydomeVao != 0 && m_skydomeIndexCount > 0) {
         glUseProgram(m_skydomeProgram);
@@ -1202,10 +1169,24 @@ void Renderer::render(const ViewControls& viewControls) {
 
             glm::mat4 cloudModel(1.0f);
             cloudModel = glm::translate(cloudModel, cloud.position);
-            const glm::vec3 cloudRotRad = glm::radians(cloud.rotationEulerDegrees);
-            cloudModel = glm::rotate(cloudModel, cloudRotRad.x, glm::vec3(1.0f, 0.0f, 0.0f));
-            cloudModel = glm::rotate(cloudModel, cloudRotRad.y, glm::vec3(0.0f, 1.0f, 0.0f));
-            cloudModel = glm::rotate(cloudModel, cloudRotRad.z, glm::vec3(0.0f, 0.0f, 1.0f));
+            // Always orient the cloud plane toward world origin.
+            glm::vec3 forward = -cloud.position;
+            if (glm::dot(forward, forward) < 0.000001f) {
+                forward = glm::vec3(0.0f, 0.0f, -1.0f);
+            } else {
+                forward = glm::normalize(forward);
+            }
+            glm::vec3 upRef(0.0f, 1.0f, 0.0f);
+            if (std::abs(glm::dot(forward, upRef)) > 0.98f) {
+                upRef = glm::vec3(0.0f, 0.0f, 1.0f);
+            }
+            const glm::vec3 right = glm::normalize(glm::cross(upRef, forward));
+            const glm::vec3 up = glm::normalize(glm::cross(forward, right));
+            glm::mat4 lookAtOriginRotation(1.0f);
+            lookAtOriginRotation[0] = glm::vec4(right, 0.0f);
+            lookAtOriginRotation[1] = glm::vec4(up, 0.0f);
+            lookAtOriginRotation[2] = glm::vec4(forward, 0.0f);
+            cloudModel *= lookAtOriginRotation;
             cloudModel = glm::scale(cloudModel, cloud.scale);
             const glm::mat4 cloudWorldModel = world * cloudModel;
             const glm::mat4 cloudMvp = projection * view * cloudWorldModel;
@@ -1221,65 +1202,7 @@ void Renderer::render(const ViewControls& viewControls) {
             glUniform1f(m_cloudGlowLoc, cloud.glowStrength);
             glUniform1f(m_cloudMotionSpeedLoc, cloud.motionSpeed);
             glUniform1i(m_cloudTypeLoc, cloud.cloudType);
-
-            const int maxPlaneCount = static_cast<int>(m_cloudCardCenters.size());
-            const glm::vec3 cloudCenterWorld = glm::vec3(cloudWorldModel * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-            const float cloudDistance = glm::distance(cloudCenterWorld, cameraPos);
-            const float cloudExtent = glm::max(glm::max(std::abs(cloud.scale.x), std::abs(cloud.scale.y)), std::abs(cloud.scale.z)) * cloud.cubeSpread;
-            const float lodNear = glm::max(8.0f, cloudExtent * 2.5f);
-            const float lodFar = glm::max(lodNear + 1.0f, cloudExtent * 10.0f + 18.0f);
-            const float lodT = glm::clamp((cloudDistance - lodNear) / (lodFar - lodNear), 0.0f, 1.0f);
-            const float distancePlaneLodFactor = glm::mix(1.0f, 0.35f, lodT);
-
-            const float focalLengthPixels = static_cast<float>(m_viewportHeight) / (2.0f * std::tan(glm::radians(50.0f) * 0.5f));
-            const float projectedDiameterPixels = (cloudExtent * 2.0f / glm::max(cloudDistance, 0.001f)) * focalLengthPixels;
-            const float screenLodT = glm::clamp((projectedDiameterPixels - 70.0f) / (280.0f - 70.0f), 0.0f, 1.0f);
-            const float screenPlaneLodFactor = glm::mix(0.25f, 1.0f, screenLodT);
-
-            const float planeLodFactor = glm::min(distancePlaneLodFactor, screenPlaneLodFactor);
-            const int visiblePlaneCount = std::clamp(
-                static_cast<int>(std::ceil(static_cast<float>(std::min(cloud.planeCount, maxPlaneCount)) * planeLodFactor)),
-                3,
-                std::min(cloud.planeCount, maxPlaneCount));
-            std::vector<int> drawOrder(static_cast<std::size_t>(maxPlaneCount));
-            for (int cardIndex = 0; cardIndex < maxPlaneCount; ++cardIndex) {
-                drawOrder[cardIndex] = cardIndex;
-            }
-
-            const uint32_t cloudSeed = cloud.planeSelectionSeed ^ static_cast<uint32_t>((cloud.cloudType + 1) * 2654435761u);
-            auto stableCardRank = [&](const int cardIndex) {
-                const glm::vec3 c = m_cloudCardCenters[static_cast<std::size_t>(cardIndex)];
-                const int cx = static_cast<int>(std::round((c.x + 2.0f) * 1000.0f));
-                const int cy = static_cast<int>(std::round((c.y + 2.0f) * 1000.0f));
-                const int cz = static_cast<int>(std::round((c.z + 2.0f) * 1000.0f));
-                uint32_t x = cloudSeed;
-                x ^= static_cast<uint32_t>(cx * 73856093);
-                x ^= static_cast<uint32_t>(cy * 19349663);
-                x ^= static_cast<uint32_t>(cz * 83492791);
-                x ^= static_cast<uint32_t>(cardIndex) * 747796405u;
-                x = (x >> 16) ^ x;
-                x *= 2246822519u;
-                x = (x >> 13) ^ x;
-                return x;
-            };
-
-            std::sort(drawOrder.begin(), drawOrder.end(), [&](const int lhs, const int rhs) {
-                return stableCardRank(lhs) < stableCardRank(rhs);
-            });
-            drawOrder.resize(static_cast<std::size_t>(visiblePlaneCount));
-
-            std::sort(drawOrder.begin(), drawOrder.end(), [&](const int lhs, const int rhs) {
-                const glm::vec3 lhsWorld = glm::vec3(cloudWorldModel * glm::vec4(m_cloudCardCenters[static_cast<std::size_t>(lhs)] * cloud.cubeSpread, 1.0f));
-                const glm::vec3 rhsWorld = glm::vec3(cloudWorldModel * glm::vec4(m_cloudCardCenters[static_cast<std::size_t>(rhs)] * cloud.cubeSpread, 1.0f));
-                const float lhsDistSq = glm::dot(lhsWorld - cameraPos, lhsWorld - cameraPos);
-                const float rhsDistSq = glm::dot(rhsWorld - cameraPos, rhsWorld - cameraPos);
-                return lhsDistSq > rhsDistSq;
-            });
-
-            for (const int cardIndex : drawOrder) {
-                const std::uintptr_t offset = static_cast<std::uintptr_t>(cardIndex * 6 * static_cast<int>(sizeof(unsigned int)));
-                glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, reinterpret_cast<const void*>(offset));
-            }
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
         }
 
         glDepthMask(GL_TRUE);
@@ -1438,78 +1361,46 @@ void Renderer::createEnvironmentResources() {
     glEnableVertexAttribArray(0);
     m_skydomeIndexCount = static_cast<int>(skyIndices.size());
 
-    // Cloud geometry: scattered rectangular cards inside an invisible cube volume.
+    // Cloud geometry: single rectangular card centered at origin.
     std::vector<float> cloudVertices;
     std::vector<unsigned int> cloudIndices;
-    constexpr int kCloudCardCapacity = 28;
-    cloudVertices.reserve(4 * kCloudCardCapacity * 6);
-    cloudIndices.reserve(kCloudCardCapacity * 6);
-    m_cloudCardCenters.clear();
-    m_cloudCardCenters.reserve(kCloudCardCapacity);
-    unsigned int cloudCardId = 0;
+    cloudVertices.reserve(4 * 6);
+    cloudIndices.reserve(6);
 
-    auto appendCloudQuad = [&](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c, const glm::vec3& d) {
-        const unsigned int base = static_cast<unsigned int>(cloudVertices.size() / 6);
-        const glm::vec3 points[4] = {a, b, c, d};
-        const glm::vec2 uvs[4] = {
-            glm::vec2(-1.0f, -1.0f),
-            glm::vec2( 1.0f, -1.0f),
-            glm::vec2( 1.0f,  1.0f),
-            glm::vec2(-1.0f,  1.0f),
-        };
-        for (int i = 0; i < 4; ++i) {
-            const glm::vec3& p = points[i];
-            cloudVertices.push_back(p.x);
-            cloudVertices.push_back(p.y);
-            cloudVertices.push_back(p.z);
-            cloudVertices.push_back(uvs[i].x);
-            cloudVertices.push_back(uvs[i].y);
-            cloudVertices.push_back(static_cast<float>(cloudCardId));
-        }
-        cloudIndices.push_back(base + 0);
-        cloudIndices.push_back(base + 1);
-        cloudIndices.push_back(base + 2);
-        cloudIndices.push_back(base + 2);
-        cloudIndices.push_back(base + 3);
-        cloudIndices.push_back(base + 0);
-        m_cloudCardCenters.push_back((a + b + c + d) * 0.25f);
-        ++cloudCardId;
+    const glm::vec3 points[4] = {
+        glm::vec3(-0.72f, -0.48f, 0.0f),
+        glm::vec3( 0.72f, -0.48f, 0.0f),
+        glm::vec3( 0.72f,  0.48f, 0.0f),
+        glm::vec3(-0.72f,  0.48f, 0.0f),
     };
-
-    std::mt19937 rng(93721u);
-    std::uniform_real_distribution<float> cubeDist(-0.52f, 0.52f);
-    std::uniform_real_distribution<float> sizeXDist(0.18f, 0.55f);
-    std::uniform_real_distribution<float> sizeYDist(0.16f, 0.58f);
-    std::uniform_real_distribution<float> yawDist(0.0f, 360.0f);
-    std::uniform_real_distribution<float> pitchDist(-28.0f, 28.0f);
-    std::uniform_real_distribution<float> rollDist(-22.0f, 22.0f);
-
-    for (int i = 0; i < kCloudCardCapacity; ++i) {
-        glm::vec3 center(cubeDist(rng), cubeDist(rng) * 0.72f, cubeDist(rng));
-        const float halfWidth = sizeXDist(rng);
-        const float halfHeight = sizeYDist(rng);
-
-        glm::mat4 rot(1.0f);
-        rot = glm::rotate(rot, glm::radians(pitchDist(rng)), glm::vec3(1.0f, 0.0f, 0.0f));
-        rot = glm::rotate(rot, glm::radians(yawDist(rng)), glm::vec3(0.0f, 1.0f, 0.0f));
-        rot = glm::rotate(rot, glm::radians(rollDist(rng)), glm::vec3(0.0f, 0.0f, 1.0f));
-        const glm::mat3 rot3(rot);
-
-        const glm::vec3 a = center + rot3 * glm::vec3(-halfWidth, -halfHeight, 0.0f);
-        const glm::vec3 b = center + rot3 * glm::vec3( halfWidth, -halfHeight, 0.0f);
-        const glm::vec3 c = center + rot3 * glm::vec3( halfWidth,  halfHeight, 0.0f);
-        const glm::vec3 d = center + rot3 * glm::vec3(-halfWidth,  halfHeight, 0.0f);
-        appendCloudQuad(a, b, c, d);
+    const glm::vec2 uvs[4] = {
+        glm::vec2(-1.0f, -1.0f),
+        glm::vec2( 1.0f, -1.0f),
+        glm::vec2( 1.0f,  1.0f),
+        glm::vec2(-1.0f,  1.0f),
+    };
+    for (int i = 0; i < 4; ++i) {
+        cloudVertices.push_back(points[i].x);
+        cloudVertices.push_back(points[i].y);
+        cloudVertices.push_back(points[i].z);
+        cloudVertices.push_back(uvs[i].x);
+        cloudVertices.push_back(uvs[i].y);
+        cloudVertices.push_back(0.0f);
     }
+    cloudIndices = {0u, 1u, 2u, 2u, 3u, 0u};
 
     glGenVertexArrays(1, &m_cloudVao);
     glGenBuffers(1, &m_cloudVbo);
-    glGenBuffers(1, &m_cloudEbo);
+    glGenBuffers(1, &m_cloudSortedEbo);
     glBindVertexArray(m_cloudVao);
     glBindBuffer(GL_ARRAY_BUFFER, m_cloudVbo);
     glBufferData(GL_ARRAY_BUFFER, static_cast<long long>(cloudVertices.size() * sizeof(float)), cloudVertices.data(), GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_cloudEbo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<long long>(cloudIndices.size() * sizeof(unsigned int)), cloudIndices.data(), GL_STATIC_DRAW);
+    // Static index buffer for a single cloud plane.
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_cloudSortedEbo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+        static_cast<long long>(cloudIndices.size() * sizeof(unsigned int)),
+        cloudIndices.data(),
+        GL_STATIC_DRAW);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * static_cast<int>(sizeof(float)), nullptr);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 6 * static_cast<int>(sizeof(float)), reinterpret_cast<void*>(3 * sizeof(float)));

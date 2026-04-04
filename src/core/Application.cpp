@@ -291,6 +291,34 @@ int Application::run() {
             if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
                 transformMode = TransformMode::Scale;
             }
+            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+                bool centered = false;
+                if (importedModelSelected && importedModel.has_value()) {
+                    viewControls.panTargetOffset.x = importedModel->position.x;
+                    viewControls.panTargetOffset.y = importedModel->position.y;
+                    viewControls.orbitTargetZTarget = importedModel->position.z;
+                    centered = true;
+                } else if (!selectedCloudIndices.empty() && !environmentSettings.cloudObjects.empty()) {
+                    glm::vec3 center(0.0f);
+                    int validCount = 0;
+                    for (const int idx : selectedCloudIndices) {
+                        if (idx >= 0 && idx < static_cast<int>(environmentSettings.cloudObjects.size())) {
+                            center += environmentSettings.cloudObjects[static_cast<std::size_t>(idx)].position;
+                            ++validCount;
+                        }
+                    }
+                    if (validCount > 0) {
+                        center /= static_cast<float>(validCount);
+                        viewControls.panTargetOffset.x = center.x;
+                        viewControls.panTargetOffset.y = center.y;
+                        viewControls.orbitTargetZTarget = center.z;
+                        centered = true;
+                    }
+                }
+                if (centered) {
+                    importStatus = "Camera focusing on selection (Z).";
+                }
+            }
             if (ImGui::IsKeyPressed(ImGuiKey_1, false)) {
                 applyWeatherPreset(0);
             }
@@ -342,8 +370,13 @@ int Application::run() {
             }
 
             if (ImGui::BeginMenu("Camera")) {
-                ImGui::SliderFloat("Zoom", &viewControls.zoomDistance, kMinCameraZoom, kMaxCameraZoom, "%.2f");
-                ImGui::DragFloat2("Pan", &viewControls.panOffset.x, 0.01f, -10.0f, 10.0f, "%.2f");
+                if (ImGui::SliderFloat("Zoom", &viewControls.zoomTargetDistance, kMinCameraZoom, kMaxCameraZoom, "%.2f")) {
+                    // Menu slider acts as an explicit camera command, so keep current zoom in sync.
+                    viewControls.zoomDistance = viewControls.zoomTargetDistance;
+                }
+                if (ImGui::DragFloat2("Pan", &viewControls.panOffset.x, 0.01f, -10.0f, 10.0f, "%.2f")) {
+                    viewControls.panTargetOffset = viewControls.panOffset;
+                }
                 ImGui::DragFloat2("World Rotation", &viewControls.worldRotationDegrees.x, 0.5f, -180.0f, 180.0f, "%.1f deg");
                 ImGui::Checkbox("Pan Mode (Ctrl+P)", &panModeEnabled);
 
@@ -484,7 +517,7 @@ int Application::run() {
                         std::uniform_real_distribution<float> opDist(0.55f, 0.90f);
                         std::uniform_real_distribution<float> softDist(0.70f, 0.95f);
                         std::uniform_real_distribution<float> detailDist(0.7f, 1.5f);
-                        std::uniform_int_distribution<int> typeDist(0, 2);
+                        std::uniform_int_distribution<int> typeDist(0, 3);
                         std::uniform_int_distribution<unsigned int> seedDist(1u, 0xffffffffu);
 
                         for (int i = 0; i < scatterCloudCount; ++i) {
@@ -498,7 +531,7 @@ int Application::run() {
                             cloud.softness = softDist(rng);
                             cloud.detail = detailDist(rng);
                             cloud.planeFade = 0.90f;
-                            cloud.planeCount = 12;
+                            cloud.planeCount = 1;
                             cloud.cubeSpread = 1.0f;
                             cloud.motionSpeed = 1.0f;
                             cloud.cloudType = typeDist(rng);
@@ -524,7 +557,7 @@ int Application::run() {
                         cloud.softness = 0.62f;
                         cloud.detail = 1.0f;
                         cloud.planeFade = 0.90f;
-                        cloud.planeCount = 12;
+                        cloud.planeCount = 1;
                         cloud.cubeSpread = 1.0f;
                         cloud.motionSpeed = 1.0f;
                         cloud.cloudType = 0;
