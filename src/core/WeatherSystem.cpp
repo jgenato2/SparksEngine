@@ -5,13 +5,15 @@
 #include <random>
 
 #include <glm/common.hpp>
+#include <glm/vec2.hpp>
 
 namespace {
 
-constexpr float kRainTopMinY = 4.0f;
-constexpr float kRainTopMaxY = 16.0f;
-constexpr float kRainGroundY = -0.70f;
+constexpr float kRainTopMinY = 2.0f;
+constexpr float kRainTopMaxY = 35.0f;
+constexpr float kRainGroundOffsetY = -0.70f;
 constexpr float kGravity = 19.2f;
+constexpr float kRainGravityAccel = 30.0f;
 constexpr std::size_t kMaxSplashParticles = 2400;
 constexpr std::size_t kMaxDropletParticles = 1800;
 constexpr std::size_t kMaxRippleParticles = 1200;
@@ -26,6 +28,14 @@ float randomRange(const float minValue, const float maxValue) {
     return distribution(weatherRng());
 }
 
+float terrainHeightOffset(const glm::vec2& positionXZ, const float patchScale, const float roughness) {
+    const float scaleA = std::max(patchScale, 0.001f) * 0.14f;
+    const float scaleB = std::max(patchScale, 0.001f) * 0.33f;
+    const float ridge = std::sin(positionXZ.x * scaleA) * std::cos(positionXZ.y * scaleA * 1.17f);
+    const float swell = std::sin(positionXZ.x * scaleB + 1.3f) * std::sin(positionXZ.y * scaleB * 0.87f - 0.8f);
+    return ridge * (1.35f * roughness) + swell * (0.42f * roughness);
+}
+
 }  // namespace
 
 namespace sparks::core {
@@ -36,6 +46,29 @@ WeatherSystem::WeatherSystem() {
 
 void WeatherSystem::setSettings(const WeatherSettings& settings) {
     m_settings = settings;
+    // Custom profile mode is intentionally disabled for consistent rain behavior.
+    m_settings.useCustomVisualProfile = false;
+    m_settings.rainTint = glm::vec3(1.0f, 1.0f, 1.0f);
+    m_settings.splashTint = glm::vec3(1.0f, 1.0f, 1.0f);
+    m_settings.dropletTint = glm::vec3(1.0f, 1.0f, 1.0f);
+    m_settings.rippleTint = glm::vec3(1.0f, 1.0f, 1.0f);
+    m_settings.rainStyleBoost = 1.0f;
+    m_settings.particleStyleBoost = 1.0f;
+    m_settings.rainConcept = std::clamp(m_settings.rainConcept, 0, 5);
+    m_settings.rainTint.r = std::clamp(m_settings.rainTint.r, 0.0f, 2.0f);
+    m_settings.rainTint.g = std::clamp(m_settings.rainTint.g, 0.0f, 2.0f);
+    m_settings.rainTint.b = std::clamp(m_settings.rainTint.b, 0.0f, 2.0f);
+    m_settings.splashTint.r = std::clamp(m_settings.splashTint.r, 0.0f, 2.0f);
+    m_settings.splashTint.g = std::clamp(m_settings.splashTint.g, 0.0f, 2.0f);
+    m_settings.splashTint.b = std::clamp(m_settings.splashTint.b, 0.0f, 2.0f);
+    m_settings.dropletTint.r = std::clamp(m_settings.dropletTint.r, 0.0f, 2.0f);
+    m_settings.dropletTint.g = std::clamp(m_settings.dropletTint.g, 0.0f, 2.0f);
+    m_settings.dropletTint.b = std::clamp(m_settings.dropletTint.b, 0.0f, 2.0f);
+    m_settings.rippleTint.r = std::clamp(m_settings.rippleTint.r, 0.0f, 2.0f);
+    m_settings.rippleTint.g = std::clamp(m_settings.rippleTint.g, 0.0f, 2.0f);
+    m_settings.rippleTint.b = std::clamp(m_settings.rippleTint.b, 0.0f, 2.0f);
+    m_settings.rainStyleBoost = std::clamp(m_settings.rainStyleBoost, 0.40f, 2.50f);
+    m_settings.particleStyleBoost = std::clamp(m_settings.particleStyleBoost, 0.40f, 2.50f);
     m_settings.rainIntensity = std::clamp(m_settings.rainIntensity, 0.0f, 1.0f);
     m_settings.rainSpeed = std::max(m_settings.rainSpeed, 0.1f);
     m_settings.rainAreaRadius = std::max(m_settings.rainAreaRadius, 1.0f);
@@ -64,9 +97,15 @@ void WeatherSystem::setSettings(const WeatherSettings& settings) {
     ensureDropCount();
 }
 
-void WeatherSystem::update(const float deltaSeconds, const glm::vec3& center) {
+void WeatherSystem::update(
+    const float deltaSeconds,
+    const glm::vec3& center,
+    const std::vector<CollisionBox>& collisionBoxes,
+    const float groundY,
+    const TerrainSurface& terrainSurface) {
     ensureDropCount();
     m_timeSeconds += std::max(deltaSeconds, 0.0f);
+    m_groundY = groundY;
 
     if (!m_settings.enabled || m_settings.rainIntensity <= 0.001f || deltaSeconds <= 0.0f) {
         m_rainLineVertices.clear();
@@ -80,12 +119,12 @@ void WeatherSystem::update(const float deltaSeconds, const glm::vec3& center) {
     }
 
     const float clampedDt = std::min(deltaSeconds, 0.05f);
-    const float fallSpeed = m_settings.rainSpeed;
-
     m_rainLineVertices.clear();
     m_rainLineVertices.reserve(m_drops.size() * 2);
 
     for (RainDrop& drop : m_drops) {
+        const float previousTopY = drop.position.y;
+        const float previousBottomY = previousTopY - drop.length;
         const float windJitterX = randomRange(-m_settings.turbulence, m_settings.turbulence);
         const float windJitterZ = randomRange(-m_settings.turbulence, m_settings.turbulence);
         const float swayPhase = drop.swayPhase + m_timeSeconds * m_settings.windSwayFrequency;
@@ -93,11 +132,34 @@ void WeatherSystem::update(const float deltaSeconds, const glm::vec3& center) {
         const float swayZ = std::cos(swayPhase * 0.77f) * m_settings.windSwayStrength;
         drop.position.x += (m_settings.windX + windJitterX * 0.25f + swayX) * clampedDt;
         drop.position.z += (m_settings.windZ + windJitterZ * 0.25f + swayZ) * clampedDt;
-        drop.position.y -= fallSpeed * drop.speedScale * clampedDt;
-        if (drop.position.y < kRainGroundY) {
-            const glm::vec3 impactPosition(drop.position.x, kRainGroundY, drop.position.z);
-            spawnImpactParticles(impactPosition);
-            respawnDrop(drop, center, false);
+
+        // Gravity-driven rain travel.
+        drop.velocityY -= kRainGravityAccel * clampedDt;
+        drop.position.y += drop.velocityY * clampedDt;
+        const float bottomY = drop.position.y - drop.length;
+        const float terrainGroundY = sampleTerrainHeight(glm::vec2(drop.position.x, drop.position.z), terrainSurface);
+
+        bool collidedWithObject = false;
+        glm::vec3 impactPosition(drop.position.x, terrainGroundY, drop.position.z);
+        for (const CollisionBox& box : collisionBoxes) {
+            if (drop.position.x < box.min.x || drop.position.x > box.max.x) {
+                continue;
+            }
+            if (drop.position.z < box.min.z || drop.position.z > box.max.z) {
+                continue;
+            }
+
+            // Trigger splash when the drop tip crosses the top of an object.
+            if (previousBottomY > box.max.y && bottomY <= box.max.y) {
+                collidedWithObject = true;
+                impactPosition = glm::vec3(drop.position.x, box.max.y, drop.position.z);
+                break;
+            }
+        }
+
+        if (collidedWithObject || bottomY < terrainGroundY) {
+            spawnImpactParticles(collidedWithObject ? impactPosition : glm::vec3(drop.position.x, terrainGroundY, drop.position.z));
+            respawnDrop(drop, center, true);
         }
 
         const glm::vec3 top = drop.position;
@@ -124,6 +186,7 @@ void WeatherSystem::ensureDropCount() {
             drop.length = randomRange(m_settings.rainLengthMin, m_settings.rainLengthMax);
             drop.speedScale = randomRange(0.75f, 1.3f);
             drop.swayPhase = randomRange(0.0f, 6.2831853f);
+            drop.velocityY = -(m_settings.rainSpeed * drop.speedScale);
         }
         respawnDrop(drop, glm::vec3(0.0f), true);
     }
@@ -133,10 +196,11 @@ void WeatherSystem::respawnDrop(RainDrop& drop, const glm::vec3& center, const b
     const float radius = m_settings.rainAreaRadius;
     drop.position.x = center.x + randomRange(-radius, radius);
     drop.position.z = center.z + randomRange(-radius, radius);
-    drop.position.y = randomHeight
+    drop.position.y = center.y + (randomHeight
         ? randomRange(kRainTopMinY, kRainTopMaxY)
-        : randomRange(kRainTopMaxY - 1.0f, kRainTopMaxY);
+        : randomRange(kRainTopMinY, kRainTopMaxY));
     drop.length = randomRange(m_settings.rainLengthMin, m_settings.rainLengthMax);
+    drop.velocityY = -(m_settings.rainSpeed * drop.speedScale * randomRange(0.90f, 1.25f));
 }
 
 void WeatherSystem::spawnImpactParticles(const glm::vec3& impactPosition) {
@@ -144,21 +208,22 @@ void WeatherSystem::spawnImpactParticles(const glm::vec3& impactPosition) {
         return;
     }
 
-    const int splashSpawnCount = static_cast<int>((1.0f + randomRange(0.0f, 3.0f) * m_settings.rainIntensity) * m_settings.splashAmount);
-    const int dropletSpawnCount = static_cast<int>((1.0f + randomRange(0.0f, 2.0f) * m_settings.rainIntensity) * m_settings.dropletAmount);
+    const int splashSpawnCount = static_cast<int>((2.0f + randomRange(0.0f, 5.0f) * m_settings.rainIntensity) * m_settings.splashAmount);
+    const int dropletSpawnCount = static_cast<int>((2.0f + randomRange(0.0f, 3.0f) * m_settings.rainIntensity) * m_settings.dropletAmount);
     const int rippleSpawnCount = static_cast<int>((1.0f + randomRange(0.0f, 2.0f) * m_settings.rainIntensity) * m_settings.rippleAmount);
 
     for (int i = 0; i < splashSpawnCount && m_splashes.size() < kMaxSplashParticles; ++i) {
         const float angle = randomRange(0.0f, 6.2831853f);
-        const float speed = randomRange(1.2f, 3.3f) * (0.5f + 0.8f * m_settings.rainIntensity) * m_settings.splashForce;
+        const float speed = randomRange(1.8f, 4.9f) * (0.7f + 0.9f * m_settings.rainIntensity) * m_settings.splashForce;
         SplashParticle particle;
         particle.position = impactPosition;
         particle.velocity = glm::vec3(
             std::cos(angle) * speed + m_settings.windX * 0.15f,
-            randomRange(2.1f, 4.7f) * m_settings.splashForce,
+            randomRange(3.0f, 6.4f) * m_settings.splashForce,
             std::sin(angle) * speed + m_settings.windZ * 0.15f);
         particle.life = 0.0f;
-        particle.maxLife = randomRange(0.16f, 0.32f);
+        particle.maxLife = randomRange(0.22f, 0.45f);
+        particle.groundY = impactPosition.y;
         m_splashes.push_back(particle);
     }
 
@@ -173,6 +238,7 @@ void WeatherSystem::spawnImpactParticles(const glm::vec3& impactPosition) {
             std::sin(angle) * horizontal + m_settings.windZ * m_settings.mistDrift);
         particle.life = 0.0f;
         particle.maxLife = randomRange(0.32f, 0.72f);
+        particle.groundY = impactPosition.y;
         m_droplets.push_back(particle);
     }
 
@@ -223,10 +289,10 @@ void WeatherSystem::spawnRandomDropletBursts(const float deltaSeconds, const glm
 
 void WeatherSystem::updateImpactParticles(const float deltaSeconds) {
     auto splashAlive = [](const SplashParticle& particle) {
-        return particle.life < particle.maxLife && particle.position.y > kRainGroundY - 0.02f;
+        return particle.life < particle.maxLife && particle.position.y > particle.groundY - 0.02f;
     };
     auto dropletAlive = [](const DropletParticle& particle) {
-        return particle.life < particle.maxLife && particle.position.y > kRainGroundY - 0.1f;
+        return particle.life < particle.maxLife && particle.position.y > particle.groundY - 0.1f;
     };
     auto rippleAlive = [](const RippleParticle& particle) {
         return particle.life < particle.maxLife;
@@ -282,6 +348,19 @@ void WeatherSystem::updateImpactParticles(const float deltaSeconds) {
         const float encoded = glm::clamp(progress, 0.0f, 1.0f);
         m_ripplePoints.emplace_back(particle.position, encoded);
     }
+}
+
+float WeatherSystem::sampleTerrainHeight(const glm::vec2& positionXZ, const TerrainSurface& terrainSurface) const {
+    if (!terrainSurface.enabled) {
+        return m_groundY;
+    }
+
+    const float halfSize = std::max(terrainSurface.size, 1.0f) * 0.5f;
+    if (positionXZ.x < -halfSize || positionXZ.x > halfSize || positionXZ.y < -halfSize || positionXZ.y > halfSize) {
+        return terrainSurface.height;
+    }
+
+    return terrainSurface.height + terrainHeightOffset(positionXZ, terrainSurface.patchScale, terrainSurface.roughness);
 }
 
 }  // namespace sparks::core

@@ -37,6 +37,10 @@ struct ImportedModelData {
     glm::vec3 rotationEulerDegrees{0.0f, 0.0f, 0.0f};
     glm::vec3 scale{1.0f, 1.0f, 1.0f};
     glm::vec3 dimensions{0.0f, 0.0f, 0.0f};
+    bool floatOnWater{false};
+    float floatHeightOffset{0.0f};
+    float floatBobAmplitude{0.06f};
+    float floatBobFrequency{0.85f};
 };
 
 struct CloudObjectSettings {
@@ -60,13 +64,20 @@ struct CloudObjectSettings {
 struct EnvironmentSettings {
     bool enableSkydome{true};
     float skydomeRadius{220.0f};
-    float skydomePitchDegrees{90.0f};
-    float skydomeYawDegrees{0.0f};
     glm::vec3 skyHorizonColor{0.70f, 0.82f, 0.95f};
     glm::vec3 skyZenithColor{0.35f, 0.55f, 0.82f};
-    glm::vec3 skyCloudColor{0.82f, 0.87f, 0.93f};
-    float skyCloudAmount{0.18f};
+    glm::vec3 skyCloudColor{0.95f, 0.97f, 1.0f};
+    float skyCloudAmount{0.32f};
     float skyCloudScale{1.0f};
+    bool enableSun{true};
+    float sunDiscSize{1.0f};
+    float sunIntensity{1.0f};
+    float waterSunStrength{1.6f};
+    float objectSunGlowStrength{0.36f};
+    glm::vec3 sunColor{1.00f, 0.90f, 0.70f};
+    float sunHeatStrength{0.35f};
+    float dustAmount{0.16f};
+    glm::vec3 dustColor{0.92f, 0.80f, 0.62f};
 
     bool enableTerrain{true};
     float terrainSize{220.0f};
@@ -75,10 +86,20 @@ struct EnvironmentSettings {
     glm::vec3 terrainColorB{0.24f, 0.28f, 0.20f};
     float terrainPatchScale{0.12f};
     float terrainRoughness{1.0f};
-    glm::vec3 terrainLightDirection{0.35f, 1.0f, 0.24f};
+    float fbxShadowSoftness{1.0f};
+    glm::vec3 terrainLightDirection{0.30f, 0.72f, -0.46f};
 
     bool enableCloudObjects{true};
     std::vector<CloudObjectSettings> cloudObjects{};
+
+    bool enableWater{false};
+    float waterLevel{0.0f};
+    glm::vec3 waterColor{0.10f, 0.36f, 0.54f};
+    float waterOpacity{0.65f};
+    float waveAmplitude{0.18f};
+    float waveFrequency{2.0f};
+
+    bool enableCinematic{false};
 };
 
 class Renderer {
@@ -99,6 +120,14 @@ public:
         const std::vector<glm::vec4>& splashPoints,
         const std::vector<glm::vec4>& dropletPoints,
         const std::vector<glm::vec4>& ripplePoints,
+        int rainConcept,
+        bool useCustomVisualProfile,
+        const glm::vec3& rainTint,
+        const glm::vec3& splashTint,
+        const glm::vec3& dropletTint,
+        const glm::vec3& rippleTint,
+        float rainStyleBoost,
+        float particleStyleBoost,
         float intensity,
         bool enabled,
         float rainLineWidth,
@@ -111,7 +140,7 @@ public:
         float rippleOpacityScale);
     void render(const ViewControls& viewControls);
 
-    unsigned int viewportTexture() const { return m_colorTexture; }
+    unsigned int viewportTexture() const { return m_usePostProcessed ? m_postColorTexture : m_colorTexture; }
 
 private:
     void createGridResources();
@@ -142,6 +171,19 @@ private:
     unsigned int m_terrainTexture{0};
     int m_terrainIndexCount{0};
     bool m_hasTerrainTexture{false};
+
+    unsigned int m_waterProgram{0};
+    unsigned int m_waterVao{0};
+    unsigned int m_waterVbo{0};
+    unsigned int m_waterEbo{0};
+    int m_waterIndexCount{0};
+
+    unsigned int m_underwaterProgram{0};
+    unsigned int m_fullscreenVao{0};
+    unsigned int m_postFbo{0};
+    unsigned int m_postColorTexture{0};
+    bool m_cameraUnderwater{false};
+    bool m_usePostProcessed{false};
 
     unsigned int m_cloudProgram{0};
     unsigned int m_cloudVao{0};
@@ -178,9 +220,18 @@ private:
     glm::vec3 m_importPosition{0.0f, 0.0f, 0.0f};
     glm::vec3 m_importRotationEuler{0.0f, 0.0f, 0.0f};
     glm::vec3 m_importScale{1.0f, 1.0f, 1.0f};
+    glm::vec3 m_importDimensions{0.0f, 0.0f, 0.0f};
 
     WeatherRenderer m_weatherRenderer;
     float m_rainIntensity{0.0f};
+    int m_rainConcept{1};
+    bool m_useCustomVisualProfile{false};
+    glm::vec3 m_rainTint{1.0f, 1.0f, 1.0f};
+    glm::vec3 m_splashTint{1.0f, 1.0f, 1.0f};
+    glm::vec3 m_dropletTint{1.0f, 1.0f, 1.0f};
+    glm::vec3 m_rippleTint{1.0f, 1.0f, 1.0f};
+    float m_rainStyleBoost{1.0f};
+    float m_particleStyleBoost{1.0f};
     bool m_weatherEnabled{false};
     float m_rainLineWidth{1.1f};
     float m_splashPointSize{6.8f};

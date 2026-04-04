@@ -103,6 +103,54 @@ glm::vec3 importedModelWorldDimensions(const render::ImportedModelData& model) {
     return glm::abs(model.dimensions * model.scale);
 }
 
+float sampleOceanWaveHeight(const render::EnvironmentSettings& environmentSettings, const glm::vec2& positionXZ, const float timeSeconds) {
+    if (!environmentSettings.enableWater) {
+        return environmentSettings.waterLevel;
+    }
+
+    const float amp = std::max(environmentSettings.waveAmplitude, 0.001f);
+    const float wf = std::max(environmentSettings.waveFrequency, 0.01f);
+    const float baseWavelength = 30.0f / wf;
+    const float gravity = 9.81f;
+    const float pi = 3.14159265359f;
+
+    auto addWave = [&](const glm::vec2& direction, const float amplitudeScale, const float wavelengthScale, const float speedScale) {
+        const glm::vec2 dir = glm::normalize(direction);
+        const float wavelength = baseWavelength * wavelengthScale;
+        const float k = 2.0f * pi / std::max(wavelength, 0.0001f);
+        const float angularVelocity = std::sqrt(gravity * k) * speedScale;
+        return amp * amplitudeScale * std::sin(k * glm::dot(dir, positionXZ) + angularVelocity * timeSeconds);
+    };
+
+    float height = environmentSettings.waterLevel;
+    height += addWave(glm::vec2( 1.00f,  0.42f), 1.00f, 1.00f, 0.88f);
+    height += addWave(glm::vec2(-0.55f,  1.00f), 0.68f, 0.65f, 0.95f);
+    height += addWave(glm::vec2( 0.80f, -0.62f), 0.38f, 0.40f, 1.10f);
+    height += addWave(glm::vec2(-0.90f,  0.45f), 0.28f, 0.30f, 1.22f);
+    height += addWave(glm::vec2( 0.40f,  1.00f), 0.14f, 0.16f, 1.30f);
+    height += addWave(glm::vec2( 1.00f, -0.22f), 0.10f, 0.12f, 1.45f);
+    return height;
+}
+
+void updateFloatingImportedModel(render::ImportedModelData& model, const render::EnvironmentSettings& environmentSettings, render::Renderer& renderer) {
+    if (!model.floatOnWater || !environmentSettings.enableWater) {
+        return;
+    }
+
+    const glm::vec3 worldDimensions = importedModelWorldDimensions(model);
+    const float halfHeight = worldDimensions.y * 0.5f;
+    const float draft = worldDimensions.y * 0.18f;
+    const float timeSeconds = static_cast<float>(ImGui::GetTime());
+    const float waterHeight = sampleOceanWaveHeight(environmentSettings, glm::vec2(model.position.x, model.position.z), timeSeconds);
+    const float bobPhase = timeSeconds * std::max(model.floatBobFrequency, 0.0f)
+        + model.position.x * 0.15f
+        + model.position.z * 0.09f;
+    const float bobOffset = std::sin(bobPhase) * std::max(model.floatBobAmplitude, 0.0f);
+
+    model.position.y = waterHeight + halfHeight - draft + model.floatHeightOffset + bobOffset;
+    renderer.setImportedModelTransform(model.position, model.rotationEulerDegrees, model.scale);
+}
+
 glm::quat composeRotationXYZDegrees(const glm::vec3& eulerDegrees) {
     const glm::vec3 r = glm::radians(eulerDegrees);
     const glm::quat qx = glm::angleAxis(r.x, glm::vec3(1.0f, 0.0f, 0.0f));
@@ -128,7 +176,7 @@ void drawStatusBar(const TransformMode transformMode, const bool panModeEnabled,
         ? "Move"
         : (transformMode == TransformMode::Rotate ? "Rotate" : "Scale");
     ImGui::Text(
-        "Tips: LMB Click=Select | LMB Drag=Box Multi-select | Drag Selected=Transform (%s) | W/E/R=Mode | Scroll=Zoom | RMB Drag=Rotate World | Ctrl+P=Pan Mode (%s)",
+        "Tips: LMB Click=Select | LMB Drag=Box Multi-select | Drag Selected=Transform (%s) | Scroll=Zoom | RMB Drag=Rotate View | WASD=Fly | Q/E=Vertical | Shift=Boost | Ctrl+P=Pan Mode (%s)",
         modeLabel,
         panModeEnabled ? "ON" : "OFF");
     if (!importStatus.empty()) {
@@ -188,6 +236,58 @@ void drawSceneTab(
         viewControls.worldRotationDegrees.y += io.MouseDelta.x * 0.25f;
     }
 
+    if (viewportHovered) {
+        glm::vec3 move(0.0f);
+        if (ImGui::IsKeyDown(ImGuiKey_W)) {
+            move.z += 1.0f;
+        }
+        if (ImGui::IsKeyDown(ImGuiKey_S)) {
+            move.z -= 1.0f;
+        }
+        if (ImGui::IsKeyDown(ImGuiKey_D)) {
+            move.x += 1.0f;
+        }
+        if (ImGui::IsKeyDown(ImGuiKey_A)) {
+            move.x -= 1.0f;
+        }
+        if (ImGui::IsKeyDown(ImGuiKey_E)) {
+            move.y += 1.0f;
+        }
+        if (ImGui::IsKeyDown(ImGuiKey_Q)) {
+            move.y -= 1.0f;
+        }
+
+        if (glm::dot(move, move) > 0.0f) {
+            const float yaw = glm::radians(viewControls.worldRotationDegrees.y);
+            const float pitch = glm::radians(viewControls.worldRotationDegrees.x);
+            const glm::vec3 forward(
+                std::sin(yaw) * std::cos(pitch),
+                -std::sin(pitch),
+                -std::cos(yaw) * std::cos(pitch));
+            const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
+            glm::vec3 right = glm::cross(forward, worldUp);
+            if (glm::dot(right, right) < 0.000001f) {
+                right = glm::vec3(1.0f, 0.0f, 0.0f);
+            } else {
+                right = glm::normalize(right);
+            }
+            const glm::vec3 up = worldUp;
+
+            const glm::vec3 moveDir = glm::normalize(right * move.x + up * move.y + forward * move.z);
+            const float sprint = ImGui::IsKeyDown(ImGuiKey_LeftShift) ? 4.0f : 1.0f;
+            const float baseSpeed = std::max(6.0f, viewControls.zoomDistance * 1.60f);
+            const float moveStep = baseSpeed * sprint * io.DeltaTime;
+            const glm::vec3 delta = moveDir * moveStep;
+
+            viewControls.panOffset.x += delta.x;
+            viewControls.panOffset.y += delta.y;
+            viewControls.orbitTargetZ += delta.z;
+
+            viewControls.panTargetOffset = viewControls.panOffset;
+            viewControls.orbitTargetZTarget = viewControls.orbitTargetZ;
+        }
+    }
+
     if (panModeEnabled && viewportHovered && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         const float panSpeed = 0.004f * viewControls.zoomDistance;
         viewControls.panOffset.x -= io.MouseDelta.x * panSpeed;
@@ -198,6 +298,10 @@ void drawSceneTab(
     const ImVec2 viewportSize = ImGui::GetContentRegionAvail();
     const int viewportWidth = static_cast<int>(viewportSize.x > 1.0f ? viewportSize.x : 1.0f);
     const int viewportHeight = static_cast<int>(viewportSize.y > 1.0f ? viewportSize.y : 1.0f);
+
+    if (importedModel.has_value()) {
+        updateFloatingImportedModel(*importedModel, environmentSettings, renderer);
+    }
 
     renderer.setViewportSize(viewportWidth, viewportHeight);
     renderer.render(viewControls);
@@ -1491,10 +1595,18 @@ void drawRightPane(
         ImGui::Separator();
         bool transformChanged = false;
         bool materialChanged = false;
+        bool floatChanged = false;
         transformChanged |= ImGui::DragFloat3("Position", &importedModel->position.x, 0.01f, -1000.0f, 1000.0f);
         transformChanged |= ImGui::DragFloat3("Rotation", &importedModel->rotationEulerDegrees.x, 0.5f, -360.0f, 360.0f);
         transformChanged |= ImGui::DragFloat3("Scale", &importedModel->scale.x, 0.01f, 0.001f, 1000.0f, "%.3f");
         ImGui::Text("Dimensions: %s", formatVec3(importedModelWorldDimensions(*importedModel)).c_str());
+        ImGui::Separator();
+        floatChanged |= ImGui::Checkbox("Float On Water", &importedModel->floatOnWater);
+        ImGui::BeginDisabled(!importedModel->floatOnWater);
+        floatChanged |= ImGui::SliderFloat("Float Height Offset", &importedModel->floatHeightOffset, -4.0f, 4.0f, "%.2f");
+        floatChanged |= ImGui::SliderFloat("Float Bob Amplitude", &importedModel->floatBobAmplitude, 0.0f, 1.0f, "%.2f");
+        floatChanged |= ImGui::SliderFloat("Float Bob Frequency", &importedModel->floatBobFrequency, 0.0f, 4.0f, "%.2f");
+        ImGui::EndDisabled();
         ImGui::Separator();
 
         int shaderMode = importedModel->unlitShading ? 1 : 0;
@@ -1509,6 +1621,11 @@ void drawRightPane(
         materialChanged |= ImGui::ColorEdit4("Diffuse", &importedModel->diffuseColor.x);
         materialChanged |= ImGui::ColorEdit3("Emissive", &importedModel->emissiveColor.x);
 
+        if (floatChanged) {
+            importedModel->floatBobAmplitude = std::clamp(importedModel->floatBobAmplitude, 0.0f, 1.0f);
+            importedModel->floatBobFrequency = std::clamp(importedModel->floatBobFrequency, 0.0f, 4.0f);
+            updateFloatingImportedModel(*importedModel, environmentSettings, renderer);
+        }
         if (transformChanged) {
             renderer.setImportedModelTransform(importedModel->position, importedModel->rotationEulerDegrees, importedModel->scale);
         }

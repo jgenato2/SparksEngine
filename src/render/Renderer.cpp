@@ -12,6 +12,7 @@
 #include <filesystem>
 
 #include <glad/gl.h>
+#include <GLFW/glfw3.h>
 #include <glm/common.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
@@ -21,6 +22,49 @@
 namespace {
 
 constexpr float kCameraFarPlane = 1000.0f;
+
+float sampleOceanWaveHeight(const sparks::render::EnvironmentSettings& environmentSettings, const glm::vec2& positionXZ, const float timeSeconds) {
+    if (!environmentSettings.enableWater) {
+        return environmentSettings.waterLevel;
+    }
+
+    const float amp = std::max(environmentSettings.waveAmplitude, 0.001f);
+    const float wf = std::max(environmentSettings.waveFrequency, 0.01f);
+    const float baseWavelength = 30.0f / wf;
+    const float gravity = 9.81f;
+    const float pi = 3.14159265359f;
+
+    auto addWave = [&](const glm::vec2& direction, const float amplitudeScale, const float wavelengthScale, const float speedScale) {
+        const glm::vec2 dir = glm::normalize(direction);
+        const float wavelength = baseWavelength * wavelengthScale;
+        const float k = 2.0f * pi / std::max(wavelength, 0.0001f);
+        const float angularVelocity = std::sqrt(gravity * k) * speedScale;
+        return amp * amplitudeScale * std::sin(k * glm::dot(dir, positionXZ) + angularVelocity * timeSeconds);
+    };
+
+    float height = environmentSettings.waterLevel;
+    height += addWave(glm::vec2( 1.00f,  0.42f), 1.00f, 1.00f, 0.88f);
+    height += addWave(glm::vec2(-0.55f,  1.00f), 0.68f, 0.65f, 0.95f);
+    height += addWave(glm::vec2( 0.80f, -0.62f), 0.38f, 0.40f, 1.10f);
+    height += addWave(glm::vec2(-0.90f,  0.45f), 0.28f, 0.30f, 1.22f);
+    height += addWave(glm::vec2( 0.40f,  1.00f), 0.14f, 0.16f, 1.30f);
+    height += addWave(glm::vec2( 1.00f, -0.22f), 0.10f, 0.12f, 1.45f);
+    return height;
+}
+
+float sampleTerrainHeight(const sparks::render::EnvironmentSettings& environmentSettings, const glm::vec2& positionXZ) {
+    if (!environmentSettings.enableTerrain) {
+        return environmentSettings.terrainHeight;
+    }
+
+    const float patchScale = std::max(environmentSettings.terrainPatchScale, 0.001f);
+    const float roughness = std::max(environmentSettings.terrainRoughness, 0.0f);
+    const float scaleA = patchScale * 0.14f;
+    const float scaleB = patchScale * 0.33f;
+    const float ridge = std::sin(positionXZ.x * scaleA) * std::cos(positionXZ.y * scaleA * 1.17f);
+    const float swell = std::sin(positionXZ.x * scaleB + 1.3f) * std::sin(positionXZ.y * scaleB * 0.87f - 0.8f);
+    return environmentSettings.terrainHeight + ridge * (1.35f * roughness) + swell * (0.42f * roughness);
+}
 
 unsigned int loadTexture2DFromFile(const std::filesystem::path& filePath, const bool clampToEdge) {
     const bool isHdr = stbi_is_hdr(filePath.string().c_str()) == 1;
@@ -188,6 +232,11 @@ unsigned int createTexturedProgram() {
         uniform int uShadowPass;
         uniform vec4 uDiffuseColor;
         uniform vec3 uEmissive;
+        uniform vec3 uSunColor;
+        uniform float uSunGlowStrength;
+        uniform int uWaterEnabled;
+        uniform float uWaterLevel;
+        uniform vec3 uWaterTint;
 
         void main() {
             if (uShadowPass == 1) {
@@ -203,13 +252,27 @@ unsigned int createTexturedProgram() {
                 discard;
             }
             if (uUnlitShading == 1) {
-                FragColor = vec4(base.rgb + uEmissive, alpha);
+                FragColor = vec4(base.rgb + uEmissive + uSunColor * (0.06 * max(uSunGlowStrength, 0.0)), alpha);
                 return;
             }
 
             float ndl = max(dot(n, l), 0.0);
             float lit = mix(0.35, 1.25, pow(ndl, 0.9));
-            FragColor = vec4(base.rgb * lit + uEmissive, alpha);
+            float sunGlow = pow(ndl, 6.0) * max(uSunGlowStrength, 0.0);
+            vec3 color = base.rgb * lit + uEmissive + uSunColor * sunGlow;
+
+            if (uWaterEnabled == 1) {
+                float waterDepth = uWaterLevel - vWorldPos.y;
+                float submerged = smoothstep(0.0, 1.8, waterDepth);
+                float deepSubmerged = smoothstep(0.35, 4.5, waterDepth);
+                float waterline = 1.0 - smoothstep(0.0, 0.08, abs(waterDepth));
+                vec3 underwaterColor = mix(color, uWaterTint * mix(0.82, 1.12, ndl), submerged * 0.58);
+                underwaterColor *= mix(vec3(1.0), vec3(0.72, 0.88, 0.96), deepSubmerged);
+                underwaterColor += vec3(0.07, 0.11, 0.09) * waterline * 0.45;
+                color = underwaterColor;
+            }
+
+            FragColor = vec4(color, alpha);
         }
     )";
 
@@ -262,8 +325,26 @@ unsigned int createSkydomeProgram() {
         uniform vec3 uCloudColor;
         uniform float uCloudAmount;
         uniform float uCloudScale;
+        uniform vec3 uSunDir;
+        uniform float uSunDiscSize;
+        uniform float uSunIntensity;
+        uniform vec3 uSunColor;
+        uniform float uSunHeatStrength;
+        uniform float uDustAmount;
+        uniform vec3 uDustColor;
+        uniform float uTime;
         uniform sampler2D uSkyTex;
         uniform int uUseTexture;
+
+        float hash21(vec2 p) {
+            p = fract(p * vec2(127.1, 311.7));
+            p += dot(p, p + 184.75);
+            return fract(p.x * p.y);
+        }
+
+        float saturate(float v) {
+            return clamp(v, 0.0, 1.0);
+        }
 
         void main() {
             float h = clamp(vLocalPos.y * 0.5 + 0.5, 0.0, 1.0);
@@ -271,6 +352,62 @@ unsigned int createSkydomeProgram() {
             float cloud = smoothstep(0.35, 0.85, cloudNoise * 0.5 + 0.5) * (1.0 - h) * uCloudAmount;
             vec3 color = mix(uHorizonColor, uZenithColor, pow(h, 0.62));
             color = mix(color, uCloudColor, cloud);
+
+            // Explicit visible sun disc + soft halo for consistent water god-ray origin.
+            vec3 skyDir = normalize(vLocalPos);
+            vec3 sunDir = normalize(uSunDir);
+            float sunDot = max(dot(skyDir, sunDir), 0.0);
+            float upperHemisphereMask = smoothstep(0.02, 0.30, h) * smoothstep(-0.02, 0.18, skyDir.y);
+            vec3 refAxis = (abs(sunDir.y) > 0.96) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+            vec3 sunRight = normalize(cross(refAxis, sunDir));
+            vec3 sunUp = normalize(cross(sunDir, sunRight));
+            vec2 sunPlane = vec2(dot(skyDir, sunRight), dot(skyDir, sunUp));
+            float sunPlaneLen = length(sunPlane);
+            float sunAngle = atan(sunPlane.y, sunPlane.x);
+            float sizeN = clamp((uSunDiscSize - 0.2) / 3.8, 0.0, 1.0);
+            float discOuter = mix(0.99970, 0.99845, sizeN);
+            float discInner = mix(0.99993, 0.99895, sizeN);
+            float sunDisc = smoothstep(discOuter, discInner, sunDot);
+
+            float heatZone = smoothstep(0.90, 0.999, sunDot) * upperHemisphereMask;
+
+            float haloNarrow = pow(sunDot, mix(34.0, 18.0, sizeN)) * 0.28;
+            float haloWide = pow(sunDot, mix(8.0, 4.5, sizeN)) * 0.10;
+            float sunHalo = haloNarrow + haloWide;
+            float rayCore = pow(saturate(1.0 - sunPlaneLen * mix(11.0, 6.0, sizeN)), 2.2);
+            float crossH = pow(saturate(1.0 - abs(sunPlane.y) * 30.0), 6.0);
+            float crossV = pow(saturate(1.0 - abs(sunPlane.x) * 35.0), 7.0);
+            float diagA = pow(saturate(1.0 - abs(sunPlane.x + sunPlane.y) * 22.0), 8.0);
+            float diagB = pow(saturate(1.0 - abs(sunPlane.x - sunPlane.y) * 22.0), 8.0);
+            float raySpark = pow(abs(cos(sunAngle * 8.0)), 22.0) * 0.10;
+            float sunRays = rayCore * (crossH * 0.26 + crossV * 0.22 + diagA * 0.10 + diagB * 0.10 + raySpark);
+
+            float streakH = pow(saturate(1.0 - abs(sunPlane.y) * 36.0), 5.5) * pow(saturate(1.0 - sunPlaneLen * 1.8), 2.0);
+            float streakV = pow(saturate(1.0 - abs(sunPlane.x) * 42.0), 7.0) * pow(saturate(1.0 - sunPlaneLen * 2.2), 2.4);
+            float lensRingOuter = smoothstep(0.24, 0.05, sunPlaneLen) * (1.0 - smoothstep(0.10, 0.02, sunPlaneLen));
+            float lensRingInner = smoothstep(0.14, 0.03, sunPlaneLen) * (1.0 - smoothstep(0.055, 0.010, sunPlaneLen));
+            float lensHalo = pow(saturate(1.0 - sunPlaneLen * 3.4), 4.0) * 0.20;
+            float chromaRing = smoothstep(0.22, 0.11, sunPlaneLen) * (1.0 - smoothstep(0.14, 0.06, sunPlaneLen));
+            float petalMask = pow(abs(cos(sunAngle * 6.0)), 6.0) * pow(saturate(1.0 - sunPlaneLen * 5.5), 2.2);
+            float anamorphic = pow(saturate(1.0 - abs(sunPlane.y) * 22.0), 5.0) * pow(saturate(1.0 - sunPlaneLen * 2.0), 1.8);
+
+            vec3 lensColor = vec3(uSunColor.r, uSunColor.g * 0.88, uSunColor.b * 1.05);
+            vec3 chromaColor = vec3(uSunColor.r * 1.10, uSunColor.g * 0.92, uSunColor.b * 1.18);
+            vec3 petalColor = mix(vec3(0.90, 0.97, 1.0), uSunColor, 0.45);
+
+            color += uSunColor * uSunIntensity * upperHemisphereMask * (sunDisc * 1.25 + sunHalo + sunRays + streakH * 0.22 + streakV * 0.10);
+            color += lensColor * uSunIntensity * upperHemisphereMask * (lensRingOuter * 0.18 + lensRingInner * 0.12 + lensHalo);
+            color += chromaColor * uSunIntensity * upperHemisphereMask * chromaRing * 0.20;
+            color += petalColor * uSunIntensity * upperHemisphereMask * petalMask * 0.26;
+            color += vec3(1.0, 0.96, 0.90) * uSunIntensity * upperHemisphereMask * anamorphic * 0.14;
+
+            float horizon = 1.0 - h;
+            float dustForward = smoothstep(0.0, 0.98, sunDot);
+            float dustNoise = hash21(vLocalPos.xz * 120.0 + vec2(uTime * 0.08, -uTime * 0.06));
+            float dustSpeck = smoothstep(0.985, 1.0, dustNoise) * dustForward;
+            float dust = clamp(uDustAmount * (horizon * (0.35 + dustForward * 0.65) + dustSpeck * 0.20), 0.0, 0.95);
+            color = mix(color, uDustColor, dust);
+            color += uSunColor * (uSunHeatStrength * 0.035) * heatZone;
 
             if (uUseTexture == 1) {
                 vec3 dir = normalize(vLocalPos);
@@ -317,14 +454,26 @@ unsigned int createTerrainProgram() {
 
         uniform mat4 uMvp;
         uniform mat4 uModel;
+        uniform float uPatchScale;
+        uniform float uRoughness;
         out vec3 vWorldPos;
         out vec3 vLocalPos;
 
+        float terrainHeightOffset(vec2 positionXZ, float patchScale, float roughness) {
+            float scaleA = max(patchScale, 0.001) * 0.14;
+            float scaleB = max(patchScale, 0.001) * 0.33;
+            float ridge = sin(positionXZ.x * scaleA) * cos(positionXZ.y * scaleA * 1.17);
+            float swell = sin(positionXZ.x * scaleB + 1.3) * sin(positionXZ.y * scaleB * 0.87 - 0.8);
+            return ridge * (1.35 * roughness) + swell * (0.42 * roughness);
+        }
+
         void main() {
-            vec4 worldPos = uModel * vec4(aPos, 1.0);
+            vec3 localPos = aPos;
+            localPos.y += terrainHeightOffset(localPos.xz, uPatchScale, uRoughness);
+            vec4 worldPos = uModel * vec4(localPos, 1.0);
             vWorldPos = worldPos.xyz;
-            vLocalPos = aPos;
-            gl_Position = uMvp * vec4(aPos, 1.0);
+            vLocalPos = localPos;
+            gl_Position = uMvp * vec4(localPos, 1.0);
         }
     )";
 
@@ -342,10 +491,44 @@ unsigned int createTerrainProgram() {
         uniform vec3 uLightDir;
         uniform sampler2D uTerrainTex;
         uniform int uUseTexture;
+        uniform int uShadowEnabled;
+        uniform vec2 uShadowCenterXZ;
+        uniform vec2 uShadowDirXZ;
+        uniform float uShadowMajorRadius;
+        uniform float uShadowMinorRadius;
+        uniform float uShadowStrength;
+        uniform float uShadowSoftness;
+
+        float hash21(vec2 p) {
+            p = fract(p * vec2(123.456, 789.012));
+            p += dot(p, p + 45.123);
+            return fract(p.x * p.y);
+        }
+
+        float noise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float n0 = mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x);
+            float n1 = mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x);
+            return mix(n0, n1, f.y);
+        }
+
+        float terrainHeightOffset(vec2 positionXZ, float patchScale, float roughness) {
+            float scaleA = max(patchScale, 0.001) * 0.14;
+            float scaleB = max(patchScale, 0.001) * 0.33;
+            float ridge = sin(positionXZ.x * scaleA) * cos(positionXZ.y * scaleA * 1.17);
+            float swell = sin(positionXZ.x * scaleB + 1.3) * sin(positionXZ.y * scaleB * 0.87 - 0.8);
+            return ridge * (1.35 * roughness) + swell * (0.42 * roughness);
+        }
 
         void main() {
-            float patchNoise = sin(vWorldPos.x * uPatchScale * 0.92) * cos(vWorldPos.z * uPatchScale * 1.08);
-            float t = clamp(patchNoise * 0.5 + 0.5, 0.0, 1.0);
+            vec2 localXZ = vLocalPos.xz * uPatchScale * 0.25;
+            float n0 = noise(localXZ * 0.5);
+            float n1 = noise(localXZ * 2.0);
+            float n2 = noise(localXZ * 8.0);
+            float patchNoise = n0 * 0.5 + n1 * 0.3 + n2 * 0.2;
+            float t = clamp(patchNoise, 0.0, 1.0);
             vec3 color = mix(uBaseA, uBaseB, t);
 
             if (uUseTexture == 1) {
@@ -355,7 +538,39 @@ unsigned int createTerrainProgram() {
             }
 
             float ndl = max(dot(vec3(0.0, 1.0, 0.0), normalize(uLightDir)), 0.0);
-            color *= mix(0.68, 1.12 + uRoughness * 0.15, ndl);
+            color *= mix(0.70, 1.15 + uRoughness * 0.12, ndl);
+
+            // Terrain self-shadowing from hills/ridges along light direction.
+            vec2 lightXZ = normalize(vec2(uLightDir.x, uLightDir.z));
+            if (length(lightXZ) > 0.0001) {
+                float currentH = vLocalPos.y;
+                float occlusion = 0.0;
+                for (int i = 1; i <= 4; ++i) {
+                    float dist = float(i) * 3.2;
+                    vec2 sampleXZ = vLocalPos.xz + lightXZ * dist;
+                    float sampleH = terrainHeightOffset(sampleXZ, uPatchScale, uRoughness);
+                    float rayH = currentH + dist * 0.12;
+                    float block = smoothstep(rayH + 0.05, rayH + 0.75, sampleH);
+                    occlusion = max(occlusion, block * (1.0 - float(i - 1) * 0.18));
+                }
+                color *= (1.0 - clamp(occlusion * 0.38, 0.0, 0.45));
+            }
+
+            if (uShadowEnabled == 1) {
+                vec2 rel = vWorldPos.xz - uShadowCenterXZ;
+                float along = dot(rel, uShadowDirXZ);
+                vec2 perpVec = rel - uShadowDirXZ * along;
+                float perp = length(perpVec);
+                float majorRadius = max(uShadowMajorRadius, 0.1);
+                float minorRadius = max(uShadowMinorRadius, 0.1);
+                float ellipse = (along * along) / (majorRadius * majorRadius) + (perp * perp) / (minorRadius * minorRadius);
+                float soft = clamp(uShadowSoftness, 0.4, 3.0);
+                float outer = mix(1.02, 1.22, clamp(soft * 0.5, 0.0, 1.0));
+                float inner = max(0.20, 0.74 - soft * 0.14);
+                float edgeSoft = smoothstep(outer, inner, ellipse);
+                float shadowAmount = clamp(edgeSoft * uShadowStrength, 0.0, 0.92);
+                color *= (1.0 - shadowAmount);
+            }
 
             FragColor = vec4(color, 1.0);
         }
@@ -377,6 +592,318 @@ unsigned int createTerrainProgram() {
         std::string infoLog(static_cast<std::size_t>(length), '\0');
         glGetProgramInfoLog(program, length, nullptr, infoLog.data());
         throw std::runtime_error("Terrain program link failed: " + infoLog);
+    }
+
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
+    return program;
+}
+
+unsigned int createWaterProgram() {
+    // Realistic ocean shader – 6 Gerstner wave trains, Beckmann specular, SSS, layered foam.
+    static constexpr const char* kVertexShader = R"(
+        #version 460 core
+        layout(location = 0) in vec3 aPos;
+
+        uniform mat4  uMvp;
+        uniform float uTime;
+        uniform float uWaveAmplitude;
+        uniform float uWaveFrequency;
+
+        out vec3  vWorldPos;
+        out vec3  vNormal;
+        out float vWaveHeight;
+        out float vSteepFoam;
+
+        const float PI = 3.14159265359;
+
+        // Gerstner wave: accumulates displacement into pos and normal.
+        // Q = peak steepness [0..1], wlen = wavelength, cspeed = phase-speed scale.
+        void addGerstner(vec2 P, vec2 D, float amp, float wlen, float cspeed, float Q,
+                         float t, inout vec3 pos, inout vec3 nrm) {
+            float k   = 2.0 * PI / max(wlen, 0.0001);
+            float w   = sqrt(9.81 * k) * cspeed;
+            float phi = k * dot(D, P) + w * t;
+            float s   = sin(phi);
+            float c   = cos(phi);
+            float Qa  = Q * amp;
+            pos.x += Qa * D.x * c;
+            pos.z += Qa * D.y * c;
+            pos.y += amp * s;
+            nrm.x -= k * amp * D.x * c;
+            nrm.z -= k * amp * D.y * c;
+            nrm.y -= Q * k * amp * s;
+        }
+
+        void main() {
+            float amp = max(uWaveAmplitude, 0.001);
+            float wf  = max(uWaveFrequency, 0.01);
+            float t   = uTime;
+            float bl  = 30.0 / wf;   // base wavelength
+
+            vec3 pos = aPos;
+            vec3 nrm = vec3(0.0, 1.0, 0.0);
+
+            // 6 wave trains spanning ocean swell → wind chop spectrum
+            addGerstner(pos.xz, normalize(vec2( 1.00,  0.42)), amp*1.00, bl*1.00, 0.88, 0.50, t, pos, nrm);
+            addGerstner(pos.xz, normalize(vec2(-0.55,  1.00)), amp*0.68, bl*0.65, 0.95, 0.42, t, pos, nrm);
+            addGerstner(pos.xz, normalize(vec2( 0.80, -0.62)), amp*0.38, bl*0.40, 1.10, 0.30, t, pos, nrm);
+            addGerstner(pos.xz, normalize(vec2(-0.90,  0.45)), amp*0.28, bl*0.30, 1.22, 0.28, t, pos, nrm);
+            addGerstner(pos.xz, normalize(vec2( 0.40,  1.00)), amp*0.14, bl*0.16, 1.30, 0.18, t, pos, nrm);
+            addGerstner(pos.xz, normalize(vec2( 1.00, -0.22)), amp*0.10, bl*0.12, 1.45, 0.14, t, pos, nrm);
+
+            vWorldPos   = pos;
+            vNormal     = normalize(nrm);
+            vWaveHeight = pos.y - aPos.y;
+
+            // Steepness foam: sharp band at wave crests
+            vSteepFoam = smoothstep(amp * 0.30, amp * 0.72, vWaveHeight);
+
+            gl_Position = uMvp * vec4(pos, 1.0);
+        }
+    )";
+
+    static constexpr const char* kFragmentShader = R"(
+        #version 460 core
+        in vec3  vWorldPos;
+        in vec3  vNormal;
+        in float vWaveHeight;
+        in float vSteepFoam;
+
+        uniform vec3  uWaterColor;
+        uniform float uWaterOpacity;
+        uniform vec3  uCameraPos;
+        uniform vec3  uLightDir;
+        uniform float uSunIntensity;
+        uniform vec3  uSunColor;
+        uniform float uTime;
+        uniform float uWaveAmplitude;
+        uniform vec2  uInteractionCenter;
+        uniform float uInteractionRadius;
+        uniform float uInteractionAmount;
+
+        out vec4 fragColor;
+
+        const float PI = 3.14159265359;
+
+        // ── Noise helpers ────────────────────────────────────────────────────
+        float hash21(vec2 p) {
+            p = fract(p * vec2(127.1, 311.7));
+            p += dot(p, p + 184.75);
+            return fract(p.x * p.y);
+        }
+        float vnoise(vec2 p) {
+            vec2 i = floor(p), f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            return mix(mix(hash21(i),           hash21(i+vec2(1,0)), f.x),
+                       mix(hash21(i+vec2(0,1)), hash21(i+vec2(1,1)), f.x), f.y);
+        }
+        float fbm3(vec2 p) {
+            return vnoise(p)*0.500 + vnoise(p*2.03+1.7)*0.250 + vnoise(p*4.11+3.2)*0.125;
+        }
+        float fbm5(vec2 p) {
+            return vnoise(p)*0.500
+                 + vnoise(p*2.03+1.70)*0.250
+                 + vnoise(p*4.11+3.20)*0.125
+                 + vnoise(p*8.17+5.90)*0.0625
+                 + vnoise(p*16.3+11.3)*0.03125;
+        }
+        float glitterMask(vec2 xz, float t) {
+            vec2 uvA = xz * 9.5 + vec2(t * 0.18, -t * 0.15);
+            vec2 uvB = xz * 18.0 + vec2(-t * 0.32, t * 0.26) + vec2(4.7, 1.9);
+            float sparkle = fbm3(uvA) * 0.65 + fbm3(uvB) * 0.35;
+            return smoothstep(0.64, 0.90, sparkle);
+        }
+
+        // ── Detail normal map (two FBM layers scrolling at different angles) ─
+        vec3 detailNormal(vec3 geoN, vec2 xz, float t) {
+            float sc = 2.0;
+            vec2 uvA = xz * sc + vec2( t*0.055,  t*0.038);
+            vec2 uvB = xz * sc * 0.72 + vec2(-t*0.032, t*0.060);
+            float eps = 0.12;
+            float hAx = fbm3(uvA+vec2(eps,0)) - fbm3(uvA-vec2(eps,0));
+            float hAz = fbm3(uvA+vec2(0,eps)) - fbm3(uvA-vec2(0,eps));
+            float hBx = fbm3(uvB+vec2(eps,0)) - fbm3(uvB-vec2(eps,0));
+            float hBz = fbm3(uvB+vec2(0,eps)) - fbm3(uvB-vec2(0,eps));
+            vec3 bA = vec3(-hAx*0.28, 1.0, -hAz*0.28);
+            vec3 bB = vec3(-hBx*0.18, 1.0, -hBz*0.18);
+            vec3 bump = normalize(bA + bB);
+            // Orient bump into world space along geoN
+            vec3 T = normalize(cross(geoN, vec3(0,0,1)));
+            vec3 B = normalize(cross(geoN, T));
+            return normalize(T*bump.x + B*bump.z + geoN*bump.y);
+        }
+
+        // ── Multi-layer foam mask ────────────────────────────────────────────
+        // Produces whitecap sheets + trailing streaks + fine-scale turbulence
+        float foamMask(vec2 xz, float t, float steepFoam) {
+            // Sheet: slow wide cells (whitecap patches)
+            vec2 uv1 = xz * 0.30 + vec2( t*0.028, -t*0.022);
+            float sheet = smoothstep(0.64, 0.86, fbm5(uv1));
+
+            // Streak: faster, narrower tendrils trailing from crests
+            vec2 uv2 = xz * 0.55 + vec2(-t*0.040,  t*0.036);
+            float streak = smoothstep(0.60, 0.82, fbm5(uv2 + vec2(2.4, 4.1)));
+
+            // Fine: high-frequency salt-and-pepper at crest tips
+            vec2 uv3 = xz * 1.20 + vec2( t*0.070, -t*0.065);
+            float fine = smoothstep(0.66, 0.86, fbm3(uv3 + vec2(7.3, 1.9)));
+
+            // Crest-driven base foam
+            float base  = steepFoam * (0.12 + 0.34 * sheet * streak);
+            // Trailing streaks that extend behind breaking crests
+            float trail = sheet * streak * smoothstep(0.18, 0.42, steepFoam);
+            // Fine detail only where there is already foam
+            float detail = fine * 0.10 * steepFoam;
+
+            return clamp(base + trail + detail, 0.0, 1.0);
+        }
+
+        float interactionFoam(vec2 xz, float t) {
+            if (uInteractionAmount <= 0.0001 || uInteractionRadius <= 0.0001) {
+                return 0.0;
+            }
+
+            vec2 delta = xz - uInteractionCenter;
+            float dist = length(delta);
+            float radius = uInteractionRadius;
+            float inner = 1.0 - smoothstep(0.0, radius * 0.85, dist);
+            float ring = 1.0 - smoothstep(radius * 0.10, radius * 0.55, abs(dist - radius * 0.92));
+            float ripple = 0.5 + 0.5 * sin(dist * 8.0 - t * 4.5);
+            return uInteractionAmount * clamp(inner * 0.22 + ring * ripple, 0.0, 1.0);
+        }
+
+        void main() {
+            vec3 V    = normalize(uCameraPos - vWorldPos);
+            vec3 geoN = normalize(vNormal);
+            vec3 N    = detailNormal(geoN, vWorldPos.xz, uTime);
+
+            // ── Lighting vectors ─────────────────────────────────────────────
+            vec3  L    = normalize(uLightDir);
+            vec3  H    = normalize(L + V);
+            float NdV  = max(dot(N, V), 0.0);
+            float NdL  = max(dot(N, L), 0.0);
+            float NdH  = max(dot(N, H), 0.0);
+
+            // ── Beckmann specular – produces a tight sun diamond on water ────
+            float m    = 0.055;
+            float mSq  = m * m;
+            float cosSq = NdH * NdH;
+            float tanSq = (1.0 - cosSq) / max(cosSq, 0.0001);
+            float beckm = exp(-tanSq / mSq) / (PI * mSq * cosSq * cosSq + 0.0001);
+            float spec  = clamp(beckm * 0.06, 0.0, 6.0);
+
+            // ── Fresnel (Schlick) ─────────────────────────────────────────────
+            float F0      = 0.040;
+            float fresnel = F0 + (1.0 - F0) * pow(1.0 - NdV, 5.0);
+
+            // ── Sky reflection gradient ───────────────────────────────────────
+            vec3 R      = reflect(-V, N);
+            float skyT  = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
+            vec3 skyZen = vec3(0.14, 0.36, 0.72);
+            vec3 skyHor = vec3(0.52, 0.76, 0.95);
+            vec3 skyCol = mix(skyHor, skyZen, skyT * skyT);
+            float sunReflect = max(dot(R, L), 0.0);
+            float sunHalo = (pow(sunReflect, 24.0) * 0.42 + pow(sunReflect, 320.0) * 3.4) * uSunIntensity;
+            skyCol += uSunColor * sunHalo;
+
+            // ── Water body colour (depth-based) ──────────────────────────────
+            float depth   = smoothstep(-uWaveAmplitude, uWaveAmplitude, vWaveHeight);
+            vec3 shallow  = vec3(0.03, 0.66, 0.62);     // teal crest
+            vec3 deep     = vec3(0.01, 0.18, 0.38);     // deep ocean
+            vec3 bodyCol  = mix(deep, mix(uWaterColor, shallow, depth*0.80), 0.72 + depth*0.28);
+
+            // ── Subsurface scattering at crests ───────────────────────────────
+            // Sun light transmits through thin wave tips → bright blue-green glow
+            float sss    = pow(max(dot(V, -L + N*0.1), 0.0), 3.5) * 1.80
+                         * smoothstep(-0.1, 0.2, vWaveHeight / max(uWaveAmplitude, 0.001));
+            vec3 sssCol  = vec3(0.04, 0.60, 0.55) * sss;
+            float transmit = pow(max(dot(-V, normalize(-L + N * 0.55)), 0.0), 2.8)
+                           * (1.0 - fresnel)
+                           * mix(0.25, 1.0, depth);
+            float refractGlow = pow(max(dot(-V, normalize(-L + N * 0.18)), 0.0), 1.8)
+                              * (1.0 - fresnel)
+                              * (0.35 + 0.65 * depth);
+            vec3 refractCol = mix(vec3(0.16, 0.58, 0.52), uSunColor, 0.42)
+                            * (transmit * 0.70 + refractGlow * 0.90)
+                            * uSunIntensity;
+
+            // Soft diffuse (water is not Lambertian but receives ambient + soft sun)
+            float diff   = mix(0.10, 0.55, NdL);
+            bodyCol     *= diff;
+            bodyCol     += sssCol;
+            bodyCol     += refractCol;
+
+            // Blend water body with sky reflection
+            vec3 waterCol = mix(bodyCol, skyCol, fresnel * 0.55);
+
+            // Sun specular
+            waterCol += uSunColor * spec * 1.35 * uSunIntensity;
+            float broadTrack = pow(sunReflect, 5.0) * pow(1.0 - NdV, 1.9) * (0.20 + 0.80 * NdL) * uSunIntensity;
+            float hotTrack = pow(sunReflect, 18.0) * (0.32 + 0.68 * (1.0 - NdV)) * uSunIntensity;
+            float glitter = pow(sunReflect, 120.0) * glitterMask(vWorldPos.xz, uTime) * (0.6 + 0.4 * NdL) * uSunIntensity;
+            waterCol += mix(vec3(1.00, 0.92, 0.70), uSunColor, 0.55) * broadTrack * 1.15;
+            waterCol += uSunColor * hotTrack * 0.95;
+            waterCol += mix(vec3(1.00, 0.98, 0.84), uSunColor, 0.35) * glitter * 2.10;
+
+            // ── Foam ─────────────────────────────────────────────────────────
+            float fm = foamMask(vWorldPos.xz, uTime, vSteepFoam);
+            float contact = interactionFoam(vWorldPos.xz, uTime);
+            fm = clamp(fm + contact * 0.85, 0.0, 1.0);
+            // Foam colour: lit faces bright white, shadowed slight blue-grey
+            vec3 foamLit   = mix(vec3(0.78, 0.83, 0.92), vec3(0.97, 0.98, 1.00), NdL);
+            float foamAlpha = clamp(fm * 1.15, 0.0, 1.0);
+            waterCol        = mix(waterCol, foamLit, foamAlpha * 0.94);
+            waterCol += vec3(0.04, 0.08, 0.07) * contact;
+
+            // Opacity: foam patches are nearly opaque; open water uses uWaterOpacity
+            float opacity = mix(uWaterOpacity, 0.98, foamAlpha * 0.55);
+            opacity       = max(opacity, 0.35 + fresnel * 0.45);
+
+            fragColor = vec4(waterCol, opacity);
+        }
+    )";
+
+    const unsigned int vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertexShader, 1, &kVertexShader, nullptr);
+    glCompileShader(vertexShader);
+
+    int success = 0;
+    glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        int length = 0;
+        glGetShaderiv(vertexShader, GL_INFO_LOG_LENGTH, &length);
+        std::string infoLog(static_cast<std::size_t>(length), '\0');
+        glGetShaderInfoLog(vertexShader, length, nullptr, infoLog.data());
+        throw std::runtime_error("Water vertex shader compile failed: " + infoLog);
+    }
+
+    const unsigned int fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragmentShader, 1, &kFragmentShader, nullptr);
+    glCompileShader(fragmentShader);
+
+    glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        int length = 0;
+        glGetShaderiv(fragmentShader, GL_INFO_LOG_LENGTH, &length);
+        std::string infoLog(static_cast<std::size_t>(length), '\0');
+        glGetShaderInfoLog(fragmentShader, length, nullptr, infoLog.data());
+        throw std::runtime_error("Water fragment shader compile failed: " + infoLog);
+    }
+
+    const unsigned int program = glCreateProgram();
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    glLinkProgram(program);
+
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (!success) {
+        int length = 0;
+        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
+        std::string infoLog(static_cast<std::size_t>(length), '\0');
+        glGetProgramInfoLog(program, length, nullptr, infoLog.data());
+        throw std::runtime_error("Water program link failed: " + infoLog);
     }
 
     glDeleteShader(vertexShader);
@@ -579,13 +1106,13 @@ unsigned int createCloudProgram() {
             vec3 pseudoNormal = normalize(vec3(uv * 0.82, sqrt(max(1.0 - dot(uv * 0.86, uv * 0.86), 0.001))));
             float ndl = max(dot(pseudoNormal, lightDir), 0.0);
 
-            float lighting = mix(0.74, 1.16, pow(ndl, 0.88));
-            vec3 highlightTint = mix(vec3(0.92, 0.96, 1.00), vec3(1.08, 1.10, 1.12), pow(ndl, 0.72));
-            vec3 coolShadowTint = vec3(0.70, 0.82, 0.97);
+            float lighting = mix(0.92, 1.14, pow(ndl, 0.88));
+            vec3 highlightTint = mix(vec3(0.98, 1.00, 1.02), vec3(1.08, 1.10, 1.12), pow(ndl, 0.72));
+            vec3 coolShadowTint = vec3(0.90, 0.95, 1.00);
             if (cloudType == 3) {
-                lighting = mix(0.80, 1.10, pow(ndl, 0.90));
-                highlightTint = mix(vec3(0.90, 0.95, 1.00), vec3(1.04, 1.08, 1.12), pow(ndl, 0.76));
-                coolShadowTint = vec3(0.72, 0.84, 0.98);
+                lighting = mix(0.94, 1.10, pow(ndl, 0.90));
+                highlightTint = mix(vec3(0.97, 1.00, 1.03), vec3(1.04, 1.08, 1.12), pow(ndl, 0.76));
+                coolShadowTint = vec3(0.91, 0.96, 1.00);
             }
             vec3 cloudTint = mix(coolShadowTint, highlightTint, smoothstep(0.0, 0.70, ndl));
 
@@ -610,11 +1137,11 @@ unsigned int createCloudProgram() {
             color += vec3(1.18, 1.20, 1.16) * bloomBack * glowBoost * 1.30;
             color += bloomTint * bloomVolume * glowBoost * 0.78;
 
-            // Keep dark regions sky-tinted instead of black.
-            vec3 lightBlueFloor = vec3(0.63, 0.74, 0.90);
-            vec3 ambientSky = lightBlueFloor * (0.16 + 0.34 * interiorMask) * (1.0 - ndl * 0.75);
+            // Keep all regions bright and sky-tinted (no dark cloud shadows).
+            vec3 lightBlueFloor = vec3(0.86, 0.92, 0.99);
+            vec3 ambientSky = lightBlueFloor * (0.36 + 0.28 * interiorMask);
             color += ambientSky;
-            color = max(color, lightBlueFloor * 0.18);
+            color = max(color, lightBlueFloor * 0.58);
 
             // Keep alpha bounded but slightly lifted so bright zones read as glowing.
             alpha = min(1.0, alpha * (1.0 + glow * 0.18));
@@ -644,6 +1171,191 @@ unsigned int createCloudProgram() {
     glDeleteShader(fragmentShader);
 
     return program;
+}
+
+// ── Underwater post-process program ─────────────────────────────────────────
+// Renders a fullscreen triangle (gl_VertexID trick, no VBO) and applies:
+//   wave-distorted UV sampling, chromatic aberration, animated FBM caustics,
+//   depth-based colour tint/fog, and a vignette.
+unsigned int createUnderwaterProgram() {
+    static constexpr const char* kVertexShader = R"(
+        #version 460 core
+        out vec2 vUv;
+        void main() {
+            // Produce a full-screen triangle from 3 gl_VertexID values
+            float x = float((gl_VertexID & 1) << 2) - 1.0;
+            float y = float((gl_VertexID & 2) << 1) - 1.0;
+            vUv = vec2(x * 0.5 + 0.5, y * 0.5 + 0.5);
+            gl_Position = vec4(x, y, 0.0, 1.0);
+        }
+    )";
+
+    static constexpr const char* kFragmentShader = R"(
+        #version 460 core
+        in vec2 vUv;
+        out vec4 fragColor;
+
+        uniform sampler2D uSceneTex;
+        uniform float     uTime;
+        uniform float     uDepth;       // metres below the water surface (>= 0)
+        uniform vec3      uWaterTint;   // configurable base water colour
+        uniform vec2      uSunUv;
+        uniform float     uSunVisible;
+        uniform int       uUnderwaterEnabled;
+        uniform int       uCinematicEnabled;
+
+        // ── Noise helpers (caustics) ─────────────────────────────────────────
+        float hash21(vec2 p) {
+            p = fract(p * vec2(127.1, 311.7));
+            p += dot(p, p + 184.75);
+            return fract(p.x * p.y);
+        }
+        float vnoise(vec2 p) {
+            vec2 i = floor(p), f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            return mix(mix(hash21(i),           hash21(i + vec2(1,0)), f.x),
+                       mix(hash21(i + vec2(0,1)), hash21(i + vec2(1,1)), f.x), f.y);
+        }
+        float fbm3(vec2 p) {
+            return vnoise(p)*0.500
+                 + vnoise(p*2.10 + 1.70)*0.250
+                 + vnoise(p*4.20 + 3.10)*0.125;
+        }
+        float godRayMask(vec2 uv, vec2 origin, vec2 dir, float t) {
+            vec2 rel = uv - origin;
+            float along = dot(rel, dir);
+            vec2 perpDir = vec2(-dir.y, dir.x);
+            float across = dot(rel, perpDir);
+            float beamBands = sin(along * 18.0 - t * 0.90) * 0.5 + 0.5;
+            float beamNoise = fbm3(vec2(along * 3.2, across * 9.0) + vec2(0.0, t * 0.12));
+            float shaft = smoothstep(0.22, 0.02, abs(across))
+                        * smoothstep(-0.08, 0.18, along)
+                        * smoothstep(1.15, 0.20, along)
+                        * smoothstep(0.38, 0.82, beamBands * 0.65 + beamNoise * 0.35);
+            return shaft;
+        }
+
+        void main() {
+            float t     = uTime;
+            float depth = max(uDepth, 0.0);
+
+            vec3 scene = texture(uSceneTex, vUv).rgb;
+            vec3 outColor = scene;
+
+            if (uUnderwaterEnabled == 1) {
+
+            // ── Wave distortion of the scene (refraction effect) ──────────────
+            // Strength scales softly from zero to a maximum of 0.014 as depth grows
+            float distStr = clamp(depth * 0.025, 0.0, 0.0045);
+            vec2 distort;
+            distort.x = sin(vUv.y * 4.5 + t * 0.55) * sin(vUv.x * 3.0 + t * 0.32);
+            distort.y = cos(vUv.x * 4.0 + t * 0.48) * cos(vUv.y * 3.2 + t * 0.40);
+            distort *= distStr;
+
+            // ── Chromatic aberration (colour channels sample at slight offsets) ─
+            float aberr = clamp(depth * 0.0018, 0.0, 0.0030);
+            vec2 uv = vUv + distort;
+            float sceneR = texture(uSceneTex, uv + vec2( aberr,  0.0)).r;
+            float sceneG = texture(uSceneTex, uv).g;
+            float sceneB = texture(uSceneTex, uv - vec2( aberr,  0.0)).b;
+            scene = vec3(sceneR, sceneG, sceneB);
+
+            // ── Caustics – bright animated light patches from sun above waves ──
+            // Fade caustics away as camera descends deeper
+            float causticStr = clamp(1.0 - depth * 0.28, 0.0, 1.0);
+            vec2 cuv = vUv * 2.80;
+            float cA = fbm3(cuv + vec2( t * 0.18,  t * 0.12));
+            float cB = fbm3(cuv + vec2(-t * 0.12,  t * 0.16) + vec2(3.4, 1.2));
+            float cC = fbm3(cuv * 0.72 + vec2( t * 0.08, -t * 0.09) + vec2(7.1, 5.4));
+            float caustic = smoothstep(0.74, 0.96, (cA + cB) * 0.50 + cC * 0.25)
+                          * causticStr * 0.30;
+
+            // ── Colour tint – deeper water is colder and darker ───────────────
+            float tintAmt = clamp(depth * 0.24, 0.0, 0.82);
+            vec3 deepColor = vec3(0.01, 0.07, 0.34);
+            // Near surface is nudged slightly toward cyan-blue, then transitions
+            // to a deeper ocean blue as depth increases.
+            vec3 nearBlue = mix(uWaterTint, vec3(0.08, 0.50, 0.74), 0.42);
+            vec3 tint = mix(nearBlue, deepColor, clamp(depth * 0.075, 0.0, 1.0));
+            vec3 tinted = mix(scene, tint, tintAmt);
+
+            // Add caustic shimmer
+            tinted += vec3(0.17, 0.38, 0.56) * caustic;
+
+            // Directional underwater god rays from the visible sun in screen space.
+            vec2 sunToScene = vec2(0.5, 0.10) - uSunUv;
+            vec2 sunDir2 = sunToScene / max(length(sunToScene), 0.0001);
+            float rayA = godRayMask(vUv, uSunUv, sunDir2, t);
+            float rayB = godRayMask(vUv, uSunUv + vec2(0.035, -0.010), normalize(sunDir2 + vec2(0.12, 0.06)), t + 1.7);
+            float godRays = (rayA * 0.72 + rayB * 0.46)
+                          * clamp(1.0 - depth * 0.22, 0.0, 1.0)
+                          * uSunVisible;
+            tinted += vec3(0.16, 0.38, 0.62) * godRays;
+
+            // ── Vignette ─────────────────────────────────────────────────────
+            vec2 vigUv = vUv * 2.0 - 1.0;
+            float vign = 1.0 - clamp(dot(vigUv * 0.58, vigUv * 0.58), 0.0, 1.0);
+            vign = mix(0.22, 1.0, vign * vign);
+            tinted *= vign;
+
+            // ── Depth fog – exponential darkening/murk as camera goes deeper ─
+            float fog = exp(-depth * 0.11);
+            tinted = mix(tint * 0.10, tinted, fog);
+
+            // ── Near-surface brightness flicker when barely submerged ─────────
+            float surfaceGlow = smoothstep(1.0, 0.0, depth) * 0.10
+                              * (0.85 + 0.15 * sin(t * 3.1 + vUv.x * 6.0));
+            tinted += vec3(0.42, 0.68, 0.92) * surfaceGlow;
+
+            outColor = tinted;
+            }
+
+            if (uCinematicEnabled == 1) {
+                float luma = dot(outColor, vec3(0.2126, 0.7152, 0.0722));
+                vec3 graded = pow(max(outColor, vec3(0.0)), vec3(0.96));
+                graded = mix(vec3(luma), graded, 1.10);
+                graded += vec3(0.020, 0.012, -0.006) * (1.0 - luma);
+                graded += vec3(-0.005, 0.000, 0.012) * luma;
+
+                float grain = hash21(vUv * vec2(1920.0, 1080.0) + vec2(t * 17.0, t * 23.0)) - 0.5;
+                graded += grain * 0.030;
+
+                vec2 c = vUv * 2.0 - 1.0;
+                c.x *= 1.10;
+                float vignette = smoothstep(1.12, 0.30, length(c));
+                graded *= mix(0.72, 1.0, vignette);
+
+                float topBar = 1.0 - smoothstep(0.0, 0.060, vUv.y);
+                float bottomBar = smoothstep(0.940, 1.0, vUv.y);
+                float barMask = clamp(topBar + bottomBar, 0.0, 1.0);
+                graded = mix(graded, vec3(0.0), barMask);
+
+                outColor = max(graded, vec3(0.0));
+            }
+
+            fragColor = vec4(outColor, 1.0);
+        }
+    )";
+
+    const unsigned int vs = compileShader(GL_VERTEX_SHADER,   kVertexShader);
+    const unsigned int fs = compileShader(GL_FRAGMENT_SHADER, kFragmentShader);
+    const unsigned int prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+
+    int success = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &success);
+    if (!success) {
+        int length = 0;
+        glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &length);
+        std::string log(static_cast<std::size_t>(length), '\0');
+        glGetProgramInfoLog(prog, length, nullptr, log.data());
+        throw std::runtime_error("Underwater program link failed: " + log);
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return prog;
 }
 
 }  // namespace
@@ -686,6 +1398,26 @@ Renderer::~Renderer() {
     }
     if (m_terrainProgram != 0) {
         glDeleteProgram(m_terrainProgram);
+    }
+
+    if (m_waterEbo != 0) {
+        glDeleteBuffers(1, &m_waterEbo);
+    }
+    if (m_waterVbo != 0) {
+        glDeleteBuffers(1, &m_waterVbo);
+    }
+    if (m_waterVao != 0) {
+        glDeleteVertexArrays(1, &m_waterVao);
+    }
+    if (m_waterProgram != 0) {
+        glDeleteProgram(m_waterProgram);
+    }
+
+    if (m_fullscreenVao != 0) {
+        glDeleteVertexArrays(1, &m_fullscreenVao);
+    }
+    if (m_underwaterProgram != 0) {
+        glDeleteProgram(m_underwaterProgram);
     }
 
     if (m_cloudProgram != 0) {
@@ -736,7 +1468,11 @@ void Renderer::initialize() {
     m_texturedProgram = createTexturedProgram();
     m_skydomeProgram = createSkydomeProgram();
     m_terrainProgram = createTerrainProgram();
+    m_waterProgram = createWaterProgram();
     m_cloudProgram = createCloudProgram();
+    m_underwaterProgram = createUnderwaterProgram();
+    // Fullscreen triangle VAO – no buffers, vertex positions generated from gl_VertexID
+    glGenVertexArrays(1, &m_fullscreenVao);
     m_cloudMvpLoc = glGetUniformLocation(m_cloudProgram, "uMvp");
     m_cloudModelLoc = glGetUniformLocation(m_cloudProgram, "uModel");
     m_cloudColorLoc = glGetUniformLocation(m_cloudProgram, "uCloudColor");
@@ -827,6 +1563,7 @@ void Renderer::setImportedModel(const ImportedModelData& model) {
     m_importUnlitShading = model.unlitShading;
     m_importDiffuseColor = model.diffuseColor;
     m_importEmissive = model.emissiveColor;
+    m_importDimensions = model.dimensions;
     setImportedModelTransform(model.position, model.rotationEulerDegrees, model.scale);
 }
 
@@ -839,10 +1576,13 @@ void Renderer::setImportedModelTransform(const glm::vec3& position, const glm::v
 void Renderer::setEnvironmentSettings(const EnvironmentSettings& settings) {
     m_environmentSettings = settings;
     m_environmentSettings.skydomeRadius = glm::clamp(m_environmentSettings.skydomeRadius, 20.0f, 4000.0f);
-    m_environmentSettings.skydomePitchDegrees = glm::clamp(m_environmentSettings.skydomePitchDegrees, -180.0f, 180.0f);
-    m_environmentSettings.skydomeYawDegrees = glm::clamp(m_environmentSettings.skydomeYawDegrees, -180.0f, 180.0f);
-    m_environmentSettings.skyCloudAmount = glm::clamp(m_environmentSettings.skyCloudAmount, 0.0f, 1.0f);
-    m_environmentSettings.skyCloudScale = glm::clamp(m_environmentSettings.skyCloudScale, 0.1f, 6.0f);
+    m_environmentSettings.skyCloudAmount = glm::clamp(m_environmentSettings.skyCloudAmount, 0.0f, 1.5f);
+    m_environmentSettings.skyCloudScale = glm::clamp(m_environmentSettings.skyCloudScale, 0.1f, 8.0f);
+    m_environmentSettings.sunDiscSize = glm::clamp(m_environmentSettings.sunDiscSize, 0.2f, 8.0f);
+    m_environmentSettings.sunIntensity = glm::clamp(m_environmentSettings.sunIntensity, 0.0f, 4.0f);
+    m_environmentSettings.waterSunStrength = glm::clamp(m_environmentSettings.waterSunStrength, 0.0f, 6.0f);
+    m_environmentSettings.sunHeatStrength = glm::clamp(m_environmentSettings.sunHeatStrength, 0.0f, 3.0f);
+    m_environmentSettings.dustAmount = glm::clamp(m_environmentSettings.dustAmount, 0.0f, 1.5f);
     m_environmentSettings.terrainSize = glm::clamp(m_environmentSettings.terrainSize, 20.0f, 4000.0f);
     m_environmentSettings.terrainHeight = glm::clamp(m_environmentSettings.terrainHeight, -20.0f, 20.0f);
     m_environmentSettings.terrainPatchScale = glm::clamp(m_environmentSettings.terrainPatchScale, 0.01f, 4.0f);
@@ -862,7 +1602,7 @@ void Renderer::setEnvironmentSettings(const EnvironmentSettings& settings) {
         }
     }
     if (glm::length(m_environmentSettings.terrainLightDirection) < 0.001f) {
-        m_environmentSettings.terrainLightDirection = glm::vec3(0.35f, 1.0f, 0.24f);
+        m_environmentSettings.terrainLightDirection = glm::vec3(0.30f, 0.72f, -0.46f);
     }
 }
 
@@ -885,6 +1625,14 @@ void Renderer::setWeatherRain(
     const std::vector<glm::vec4>& splashPoints,
     const std::vector<glm::vec4>& dropletPoints,
     const std::vector<glm::vec4>& ripplePoints,
+    const int rainConcept,
+    const bool useCustomVisualProfile,
+    const glm::vec3& rainTint,
+    const glm::vec3& splashTint,
+    const glm::vec3& dropletTint,
+    const glm::vec3& rippleTint,
+    const float rainStyleBoost,
+    const float particleStyleBoost,
     const float intensity,
     const bool enabled,
     const float rainLineWidth,
@@ -895,6 +1643,14 @@ void Renderer::setWeatherRain(
     const float splashOpacityScale,
     const float dropletOpacityScale,
     const float rippleOpacityScale) {
+    m_rainConcept = std::clamp(rainConcept, 0, 5);
+    m_useCustomVisualProfile = useCustomVisualProfile;
+    m_rainTint = glm::clamp(rainTint, glm::vec3(0.0f), glm::vec3(2.0f));
+    m_splashTint = glm::clamp(splashTint, glm::vec3(0.0f), glm::vec3(2.0f));
+    m_dropletTint = glm::clamp(dropletTint, glm::vec3(0.0f), glm::vec3(2.0f));
+    m_rippleTint = glm::clamp(rippleTint, glm::vec3(0.0f), glm::vec3(2.0f));
+    m_rainStyleBoost = glm::clamp(rainStyleBoost, 0.40f, 2.50f);
+    m_particleStyleBoost = glm::clamp(particleStyleBoost, 0.40f, 2.50f);
     m_rainIntensity = glm::clamp(intensity, 0.0f, 1.0f);
     m_weatherEnabled = enabled;
     m_rainLineWidth = glm::clamp(rainLineWidth, 0.5f, 4.0f);
@@ -945,25 +1701,39 @@ void Renderer::render(const ViewControls& viewControls) {
         glUseProgram(m_skydomeProgram);
 
         glm::mat4 skydomeModel(1.0f);
-        skydomeModel = glm::rotate(skydomeModel, glm::radians(m_environmentSettings.skydomePitchDegrees), glm::vec3(1.0f, 0.0f, 0.0f));
-        skydomeModel = glm::rotate(skydomeModel, glm::radians(m_environmentSettings.skydomeYawDegrees), glm::vec3(0.0f, 1.0f, 0.0f));
         skydomeModel = glm::scale(skydomeModel, glm::vec3(m_environmentSettings.skydomeRadius));
         const glm::mat4 skyMvp = projection * view * world * skydomeModel;
 
         const int skyMvpLoc = glGetUniformLocation(m_skydomeProgram, "uMvp");
         const int skyHorizonLoc = glGetUniformLocation(m_skydomeProgram, "uHorizonColor");
         const int skyZenithLoc = glGetUniformLocation(m_skydomeProgram, "uZenithColor");
-        const int skyCloudLoc = glGetUniformLocation(m_skydomeProgram, "uCloudColor");
+        const int skyCloudColorLoc = glGetUniformLocation(m_skydomeProgram, "uCloudColor");
         const int skyCloudAmountLoc = glGetUniformLocation(m_skydomeProgram, "uCloudAmount");
         const int skyCloudScaleLoc = glGetUniformLocation(m_skydomeProgram, "uCloudScale");
+        const int skySunDirLoc = glGetUniformLocation(m_skydomeProgram, "uSunDir");
+        const int skySunDiscSizeLoc = glGetUniformLocation(m_skydomeProgram, "uSunDiscSize");
+        const int skySunIntensityLoc = glGetUniformLocation(m_skydomeProgram, "uSunIntensity");
+        const int skySunColorLoc = glGetUniformLocation(m_skydomeProgram, "uSunColor");
+        const int skySunHeatLoc = glGetUniformLocation(m_skydomeProgram, "uSunHeatStrength");
+        const int skyDustAmountLoc = glGetUniformLocation(m_skydomeProgram, "uDustAmount");
+        const int skyDustColorLoc = glGetUniformLocation(m_skydomeProgram, "uDustColor");
+        const int skyTimeLoc = glGetUniformLocation(m_skydomeProgram, "uTime");
         const int skyTexLoc = glGetUniformLocation(m_skydomeProgram, "uSkyTex");
         const int skyUseTexLoc = glGetUniformLocation(m_skydomeProgram, "uUseTexture");
         glUniformMatrix4fv(skyMvpLoc, 1, GL_FALSE, glm::value_ptr(skyMvp));
         glUniform3f(skyHorizonLoc, m_environmentSettings.skyHorizonColor.r, m_environmentSettings.skyHorizonColor.g, m_environmentSettings.skyHorizonColor.b);
         glUniform3f(skyZenithLoc, m_environmentSettings.skyZenithColor.r, m_environmentSettings.skyZenithColor.g, m_environmentSettings.skyZenithColor.b);
-        glUniform3f(skyCloudLoc, m_environmentSettings.skyCloudColor.r, m_environmentSettings.skyCloudColor.g, m_environmentSettings.skyCloudColor.b);
-        glUniform1f(skyCloudAmountLoc, m_environmentSettings.skyCloudAmount);
+        glUniform3f(skyCloudColorLoc, m_environmentSettings.skyCloudColor.r, m_environmentSettings.skyCloudColor.g, m_environmentSettings.skyCloudColor.b);
+        glUniform1f(skyCloudAmountLoc, m_environmentSettings.enableCloudObjects ? m_environmentSettings.skyCloudAmount : m_environmentSettings.skyCloudAmount * 0.68f);
         glUniform1f(skyCloudScaleLoc, m_environmentSettings.skyCloudScale);
+        glUniform3f(skySunDirLoc, m_environmentSettings.terrainLightDirection.x, m_environmentSettings.terrainLightDirection.y, m_environmentSettings.terrainLightDirection.z);
+        glUniform1f(skySunDiscSizeLoc, m_environmentSettings.sunDiscSize);
+        glUniform1f(skySunIntensityLoc, m_environmentSettings.enableSun ? m_environmentSettings.sunIntensity : 0.0f);
+        glUniform3f(skySunColorLoc, m_environmentSettings.sunColor.r, m_environmentSettings.sunColor.g, m_environmentSettings.sunColor.b);
+        glUniform1f(skySunHeatLoc, m_environmentSettings.sunHeatStrength);
+        glUniform1f(skyDustAmountLoc, m_environmentSettings.dustAmount);
+        glUniform3f(skyDustColorLoc, m_environmentSettings.dustColor.r, m_environmentSettings.dustColor.g, m_environmentSettings.dustColor.b);
+        glUniform1f(skyTimeLoc, elapsedSeconds);
         glUniform1i(skyTexLoc, 0);
         glUniform1i(skyUseTexLoc, m_hasSkydomeTexture ? 1 : 0);
 
@@ -982,7 +1752,7 @@ void Renderer::render(const ViewControls& viewControls) {
         glUseProgram(m_terrainProgram);
 
         glm::mat4 terrainModel(1.0f);
-        terrainModel = glm::translate(terrainModel, glm::vec3(0.0f, m_environmentSettings.terrainHeight + 0.76f, 0.0f));
+        terrainModel = glm::translate(terrainModel, glm::vec3(0.0f, m_environmentSettings.terrainHeight, 0.0f));
         terrainModel = glm::scale(terrainModel, glm::vec3(m_environmentSettings.terrainSize / 220.0f, 1.0f, m_environmentSettings.terrainSize / 220.0f));
         const glm::mat4 terrainWorldModel = world * terrainModel;
         const glm::mat4 terrainMvp = projection * view * terrainWorldModel;
@@ -996,6 +1766,13 @@ void Renderer::render(const ViewControls& viewControls) {
         const int terrainLightDirLoc = glGetUniformLocation(m_terrainProgram, "uLightDir");
         const int terrainTexLoc = glGetUniformLocation(m_terrainProgram, "uTerrainTex");
         const int terrainUseTexLoc = glGetUniformLocation(m_terrainProgram, "uUseTexture");
+        const int terrainShadowEnabledLoc = glGetUniformLocation(m_terrainProgram, "uShadowEnabled");
+        const int terrainShadowCenterLoc = glGetUniformLocation(m_terrainProgram, "uShadowCenterXZ");
+        const int terrainShadowDirLoc = glGetUniformLocation(m_terrainProgram, "uShadowDirXZ");
+        const int terrainShadowMajorRadiusLoc = glGetUniformLocation(m_terrainProgram, "uShadowMajorRadius");
+        const int terrainShadowMinorRadiusLoc = glGetUniformLocation(m_terrainProgram, "uShadowMinorRadius");
+        const int terrainShadowStrengthLoc = glGetUniformLocation(m_terrainProgram, "uShadowStrength");
+        const int terrainShadowSoftnessLoc = glGetUniformLocation(m_terrainProgram, "uShadowSoftness");
         glUniformMatrix4fv(terrainMvpLoc, 1, GL_FALSE, glm::value_ptr(terrainMvp));
         glUniformMatrix4fv(terrainModelLoc, 1, GL_FALSE, glm::value_ptr(terrainWorldModel));
         glUniform3f(terrainBaseALoc, m_environmentSettings.terrainColorA.r, m_environmentSettings.terrainColorA.g, m_environmentSettings.terrainColorA.b);
@@ -1006,6 +1783,51 @@ void Renderer::render(const ViewControls& viewControls) {
         glUniform1i(terrainTexLoc, 1);
         glUniform1i(terrainUseTexLoc, m_hasTerrainTexture ? 1 : 0);
 
+        const bool hasImportShadow = (m_importVao != 0 && m_importIndexCount > 0);
+        if (hasImportShadow) {
+            const glm::vec3 scaledDimensions = glm::abs(m_importDimensions * m_importScale);
+            const float heightFactor = glm::clamp(scaledDimensions.y * 0.10f, 0.0f, 1.4f);
+            glm::vec3 lightN = glm::normalize(m_environmentSettings.terrainLightDirection);
+            if (glm::length(lightN) < 0.001f) {
+                lightN = glm::vec3(0.30f, 0.72f, -0.46f);
+            }
+            glm::vec2 shadowDir = glm::normalize(glm::vec2(-lightN.x, -lightN.z));
+            if (glm::length(shadowDir) < 0.001f) {
+                shadowDir = glm::vec2(0.0f, 1.0f);
+            }
+            const glm::vec2 shadowPerp(-shadowDir.y, shadowDir.x);
+            const float yawRad = glm::radians(m_importRotationEuler.y);
+            const glm::vec2 axisX(std::cos(yawRad), std::sin(yawRad));
+            const glm::vec2 axisZ(-std::sin(yawRad), std::cos(yawRad));
+            const float halfX = scaledDimensions.x * 0.5f;
+            const float halfY = scaledDimensions.y * 0.5f;
+            const float halfZ = scaledDimensions.z * 0.5f;
+            const float alongExtent = std::abs(glm::dot(axisX, shadowDir)) * halfX + std::abs(glm::dot(axisZ, shadowDir)) * halfZ;
+            const float acrossExtent = std::abs(glm::dot(axisX, shadowPerp)) * halfX + std::abs(glm::dot(axisZ, shadowPerp)) * halfZ;
+            const float sunY = std::max(lightN.y, 0.08f);
+            const float castLength = (halfY / sunY) * 0.85f;
+            const glm::vec2 centerXZ = glm::vec2(m_importPosition.x, m_importPosition.z) + shadowDir * (castLength * 0.55f);
+            const float majorRadius = alongExtent + castLength + 0.18f;
+            const float minorRadius = acrossExtent * 0.95f + 0.16f;
+            const float shadowStrength = glm::clamp(0.34f + heightFactor * 0.25f, 0.22f, 0.62f);
+
+            glUniform1i(terrainShadowEnabledLoc, 1);
+            glUniform2f(terrainShadowCenterLoc, centerXZ.x, centerXZ.y);
+            glUniform2f(terrainShadowDirLoc, shadowDir.x, shadowDir.y);
+            glUniform1f(terrainShadowMajorRadiusLoc, std::max(majorRadius, 0.2f));
+            glUniform1f(terrainShadowMinorRadiusLoc, std::max(minorRadius, 0.1f));
+            glUniform1f(terrainShadowStrengthLoc, shadowStrength);
+            glUniform1f(terrainShadowSoftnessLoc, m_environmentSettings.fbxShadowSoftness);
+        } else {
+            glUniform1i(terrainShadowEnabledLoc, 0);
+            glUniform2f(terrainShadowCenterLoc, 0.0f, 0.0f);
+            glUniform2f(terrainShadowDirLoc, 0.0f, 1.0f);
+            glUniform1f(terrainShadowMajorRadiusLoc, 1.0f);
+            glUniform1f(terrainShadowMinorRadiusLoc, 0.7f);
+            glUniform1f(terrainShadowStrengthLoc, 0.0f);
+            glUniform1f(terrainShadowSoftnessLoc, m_environmentSettings.fbxShadowSoftness);
+        }
+
         if (m_hasTerrainTexture) {
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, m_terrainTexture);
@@ -1014,6 +1836,59 @@ void Renderer::render(const ViewControls& viewControls) {
         glBindVertexArray(m_terrainVao);
         glDrawElements(GL_TRIANGLES, m_terrainIndexCount, GL_UNSIGNED_INT, nullptr);
     }
+
+    // Water plane rendering
+    if (m_environmentSettings.enableWater && m_waterProgram != 0 && m_waterVao != 0 && m_waterIndexCount > 0) {
+        glUseProgram(m_waterProgram);
+
+        // The model matrix only translates to waterLevel; waves are displaced in the vertex shader.
+        glm::mat4 waterModel(1.0f);
+        waterModel = glm::translate(waterModel, glm::vec3(0.0f, m_environmentSettings.waterLevel, 0.0f));
+        const glm::mat4 waterWorldModel = world * waterModel;
+        const glm::mat4 waterMvp = projection * view * waterWorldModel;
+
+        glUniformMatrix4fv(glGetUniformLocation(m_waterProgram, "uMvp"),         1, GL_FALSE, glm::value_ptr(waterMvp));
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uTime"),              static_cast<float>(glfwGetTime()));
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uWaveAmplitude"),     m_environmentSettings.waveAmplitude);
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uWaveFrequency"),     m_environmentSettings.waveFrequency);
+        glUniform3f(glGetUniformLocation(m_waterProgram, "uWaterColor"),        m_environmentSettings.waterColor.r, m_environmentSettings.waterColor.g, m_environmentSettings.waterColor.b);
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uWaterOpacity"),      m_environmentSettings.waterOpacity);
+        glUniform3f(glGetUniformLocation(m_waterProgram, "uCameraPos"),         cameraPos.x, cameraPos.y, cameraPos.z);
+        glUniform3f(glGetUniformLocation(m_waterProgram, "uLightDir"),          m_environmentSettings.terrainLightDirection.x, m_environmentSettings.terrainLightDirection.y, m_environmentSettings.terrainLightDirection.z);
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uSunIntensity"),      m_environmentSettings.enableSun ? (m_environmentSettings.sunIntensity * m_environmentSettings.waterSunStrength) : 0.0f);
+        glUniform3f(glGetUniformLocation(m_waterProgram, "uSunColor"),          m_environmentSettings.sunColor.r, m_environmentSettings.sunColor.g, m_environmentSettings.sunColor.b);
+
+        float interactionAmount = 0.0f;
+        float interactionRadius = 0.0f;
+        glm::vec2 interactionCenter(0.0f);
+        if (m_importIndexCount > 0) {
+            const glm::vec3 scaledDimensions = glm::abs(m_importDimensions * m_importScale);
+            const float halfHeight = scaledDimensions.y * 0.5f;
+            const float waterSurface = sampleOceanWaveHeight(m_environmentSettings, glm::vec2(m_importPosition.x, m_importPosition.z), static_cast<float>(glfwGetTime()));
+            const float objectBottom = m_importPosition.y - halfHeight;
+            const float objectTop = m_importPosition.y + halfHeight;
+            if (objectBottom <= waterSurface + 0.08f && objectTop >= waterSurface - 0.10f) {
+                interactionCenter = glm::vec2(m_importPosition.x, m_importPosition.z);
+                interactionRadius = std::max(0.45f, std::max(scaledDimensions.x, scaledDimensions.z) * 0.38f);
+                const float immersion = glm::clamp((waterSurface - objectBottom) / std::max(scaledDimensions.y, 0.001f), 0.0f, 1.0f);
+                interactionAmount = glm::smoothstep(0.02f, 0.30f, immersion);
+            }
+        }
+        glUniform2f(glGetUniformLocation(m_waterProgram, "uInteractionCenter"), interactionCenter.x, interactionCenter.y);
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uInteractionRadius"), interactionRadius);
+        glUniform1f(glGetUniformLocation(m_waterProgram, "uInteractionAmount"), interactionAmount);
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        glBindVertexArray(m_waterVao);
+        glDrawElements(GL_TRIANGLES, m_waterIndexCount, GL_UNSIGNED_INT, nullptr);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+    }
+
+    // Switch back to main shader for grid rendering
+    glUseProgram(m_shaderProgram);
 
     const int mvpLoc = glGetUniformLocation(m_shaderProgram, "uMvp");
     const int modelLoc = glGetUniformLocation(m_shaderProgram, "uModel");
@@ -1029,6 +1904,7 @@ void Renderer::render(const ViewControls& viewControls) {
     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(gridMvp));
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(world));
     glBindVertexArray(m_gridVao);
+    glLineWidth(1.0f);
     glUniform1f(alphaLoc, 1.0f);
     glUniform1f(gradientLoc, 0.0f);
     glUniform3f(colorLoc, 0.24f, 0.24f, 0.26f);
@@ -1037,21 +1913,6 @@ void Renderer::render(const ViewControls& viewControls) {
     glDrawArrays(GL_LINES, m_gridAxisXStart, 2);
     glUniform3f(colorLoc, 0.11f, 0.43f, 0.11f);
     glDrawArrays(GL_LINES, m_gridAxisYStart, 2);
-
-    // Planar projected shadows onto the grid plane.
-    constexpr float kShadowPlaneY = -0.749f;
-    const glm::vec4 shadowPlane(0.0f, 1.0f, 0.0f, -kShadowPlaneY);
-    const glm::vec3 lightDir3 = glm::normalize(glm::vec3(-0.65f, 1.0f, -0.45f));
-    const glm::vec4 lightDir(lightDir3, 0.0f);
-
-    const float dot = shadowPlane.x * lightDir.x + shadowPlane.y * lightDir.y + shadowPlane.z * lightDir.z + shadowPlane.w * lightDir.w;
-    glm::mat4 shadowProj(0.0f);
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            const float identity = (row == col) ? dot : 0.0f;
-            shadowProj[col][row] = identity - lightDir[row] * shadowPlane[col];
-        }
-    }
 
     if (m_importVao != 0 && m_importTexture != 0 && m_importIndexCount > 0) {
         glUseProgram(m_texturedProgram);
@@ -1066,6 +1927,11 @@ void Renderer::render(const ViewControls& viewControls) {
         const int shadowPassLocT = glGetUniformLocation(m_texturedProgram, "uShadowPass");
         const int diffuseColorLocT = glGetUniformLocation(m_texturedProgram, "uDiffuseColor");
         const int emissiveLocT = glGetUniformLocation(m_texturedProgram, "uEmissive");
+        const int sunColorLocT = glGetUniformLocation(m_texturedProgram, "uSunColor");
+        const int sunGlowStrengthLocT = glGetUniformLocation(m_texturedProgram, "uSunGlowStrength");
+        const int waterEnabledLocT = glGetUniformLocation(m_texturedProgram, "uWaterEnabled");
+        const int waterLevelLocT = glGetUniformLocation(m_texturedProgram, "uWaterLevel");
+        const int waterTintLocT = glGetUniformLocation(m_texturedProgram, "uWaterTint");
 
         glm::mat4 model(1.0f);
         model = glm::translate(model, m_importPosition);
@@ -1078,28 +1944,6 @@ void Renderer::render(const ViewControls& viewControls) {
         const glm::mat4 worldModel = world * model;
         const glm::mat4 mvp = projection * view * worldModel;
 
-        // Draw projected FBX shadow onto the grid first.
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDepthMask(GL_FALSE);
-
-        const glm::mat4 shadowWorldModel = world * (shadowProj * model);
-        const glm::mat4 shadowMvp = projection * view * shadowWorldModel;
-        glUniformMatrix4fv(mvpLocT, 1, GL_FALSE, glm::value_ptr(shadowMvp));
-        glUniformMatrix4fv(modelLocT, 1, GL_FALSE, glm::value_ptr(shadowWorldModel));
-        glUniform3f(lightPosLocT, 5.5f, 6.5f, 4.0f);
-        glUniform1i(texLocT, 0);
-        glUniform1f(opacityLocT, 0.0f);
-        glUniform1f(alphaCutoffLocT, 1.0f);
-        glUniform1i(unlitShadingLocT, 0);
-        glUniform1i(shadowPassLocT, 1);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glBindVertexArray(m_importVao);
-        glDrawElements(GL_TRIANGLES, m_importIndexCount, GL_UNSIGNED_INT, nullptr);
-
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
-
         glUniformMatrix4fv(mvpLocT, 1, GL_FALSE, glm::value_ptr(mvp));
         glUniformMatrix4fv(modelLocT, 1, GL_FALSE, glm::value_ptr(worldModel));
         glUniform3f(lightPosLocT, 5.5f, 6.5f, 4.0f);
@@ -1110,6 +1954,11 @@ void Renderer::render(const ViewControls& viewControls) {
         glUniform1i(shadowPassLocT, 0);
         glUniform4f(diffuseColorLocT, m_importDiffuseColor.r, m_importDiffuseColor.g, m_importDiffuseColor.b, m_importDiffuseColor.a);
         glUniform3f(emissiveLocT, m_importEmissive.r, m_importEmissive.g, m_importEmissive.b);
+        glUniform3f(sunColorLocT, m_environmentSettings.sunColor.r, m_environmentSettings.sunColor.g, m_environmentSettings.sunColor.b);
+        glUniform1f(sunGlowStrengthLocT, (m_environmentSettings.enableSun ? m_environmentSettings.sunIntensity : 0.0f) * m_environmentSettings.objectSunGlowStrength);
+        glUniform1i(waterEnabledLocT, m_environmentSettings.enableWater ? 1 : 0);
+        glUniform1f(waterLevelLocT, m_environmentSettings.waterLevel);
+        glUniform3f(waterTintLocT, 0.10f, 0.42f, 0.52f);
 
         if (m_importAlphaBlend) {
             glEnable(GL_BLEND);
@@ -1213,6 +2062,10 @@ void Renderer::render(const ViewControls& viewControls) {
         projection,
         view,
         world,
+        m_rainConcept,
+        m_useCustomVisualProfile,
+        m_rainTint,
+        m_rainStyleBoost,
         m_rainIntensity,
         m_weatherEnabled,
         m_rainLineWidth,
@@ -1221,6 +2074,10 @@ void Renderer::render(const ViewControls& viewControls) {
         projection,
         view,
         world,
+        m_rainConcept,
+        m_useCustomVisualProfile,
+        m_splashTint,
+        m_particleStyleBoost,
         m_rainIntensity,
         m_weatherEnabled,
         m_splashPointSize,
@@ -1229,6 +2086,10 @@ void Renderer::render(const ViewControls& viewControls) {
         projection,
         view,
         world,
+        m_rainConcept,
+        m_useCustomVisualProfile,
+        m_dropletTint,
+        m_particleStyleBoost,
         m_rainIntensity,
         m_weatherEnabled,
         m_dropletPointSize,
@@ -1237,12 +2098,90 @@ void Renderer::render(const ViewControls& viewControls) {
         projection,
         view,
         world,
+        m_rainConcept,
+        m_useCustomVisualProfile,
+        m_rippleTint,
+        m_particleStyleBoost,
         m_rainIntensity,
         m_weatherEnabled,
         m_ripplePointSize,
         m_rippleOpacityScale);
 
+    // Reset GL line width after weather rendering
+    glLineWidth(1.0f);
+
     glBindVertexArray(0);
+
+    // ── Underwater post-process pass ─────────────────────────────────────────
+    // Detect whether the effective camera position in scene-local space is
+    // below the flat water plane. The renderer orbits by rotating the world,
+    // so comparing against the pre-rotation camera position produces the wrong
+    // result once the scene is tilted.
+    m_cameraUnderwater = false;
+    m_usePostProcessed = false;
+    if (m_underwaterProgram != 0 && m_postFbo != 0 && m_postColorTexture != 0 && m_fullscreenVao != 0) {
+        const bool wantCinematic = m_environmentSettings.enableCinematic;
+        bool enableUnderwater = false;
+        float underwaterDepth = 0.0f;
+
+        if (m_environmentSettings.enableWater) {
+            const glm::mat4 inverseWorld = glm::inverse(world);
+            const glm::vec3 sceneLocalCameraPos = glm::vec3(inverseWorld * glm::vec4(cameraPos, 1.0f));
+            underwaterDepth = m_environmentSettings.waterLevel - sceneLocalCameraPos.y;
+            if (underwaterDepth > 0.01f) {
+                enableUnderwater = true;
+                m_cameraUnderwater = true;
+            }
+        }
+
+        if (enableUnderwater || wantCinematic) {
+            m_usePostProcessed = true;
+
+            glm::vec2 sunUv(0.5f, -0.2f);
+            float sunVisible = 0.0f;
+            if (enableUnderwater) {
+                const glm::vec3 lightDirLocal = glm::normalize(m_environmentSettings.terrainLightDirection);
+                const float skyRadius = std::max(m_environmentSettings.skydomeRadius, 1.0f);
+                const glm::vec3 sunLocal = lightDirLocal * (skyRadius * 0.92f);
+                const glm::vec4 sunClip = projection * view * world * glm::vec4(sunLocal, 1.0f);
+                if (sunClip.w > 0.0001f) {
+                    const glm::vec3 sunNdc = glm::vec3(sunClip) / sunClip.w;
+                    sunUv = glm::vec2(sunNdc.x * 0.5f + 0.5f, sunNdc.y * 0.5f + 0.5f);
+                    const float xVis = 1.0f - glm::clamp((std::abs(sunNdc.x) - 1.0f) * 2.2f, 0.0f, 1.0f);
+                    const float yVis = 1.0f - glm::clamp((std::abs(sunNdc.y) - 1.0f) * 2.2f, 0.0f, 1.0f);
+                    const float zVis = (sunNdc.z >= -1.0f && sunNdc.z <= 1.0f) ? 1.0f : 0.0f;
+                    sunVisible = xVis * yVis * zVis * (m_environmentSettings.enableSun ? m_environmentSettings.sunIntensity : 0.0f);
+                }
+            }
+
+            glBindFramebuffer(GL_FRAMEBUFFER, m_postFbo);
+            glViewport(0, 0, m_viewportWidth, m_viewportHeight);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_BLEND);
+
+            glUseProgram(m_underwaterProgram);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, m_colorTexture);
+            glUniform1i(glGetUniformLocation(m_underwaterProgram, "uSceneTex"), 0);
+            glUniform1f(glGetUniformLocation(m_underwaterProgram, "uTime"), static_cast<float>(glfwGetTime()));
+            glUniform1f(glGetUniformLocation(m_underwaterProgram, "uDepth"), enableUnderwater ? underwaterDepth : 0.0f);
+            glUniform3f(glGetUniformLocation(m_underwaterProgram, "uWaterTint"),
+                m_environmentSettings.waterColor.r,
+                m_environmentSettings.waterColor.g,
+                m_environmentSettings.waterColor.b);
+            glUniform2f(glGetUniformLocation(m_underwaterProgram, "uSunUv"), sunUv.x, sunUv.y);
+            glUniform1f(glGetUniformLocation(m_underwaterProgram, "uSunVisible"), sunVisible);
+            glUniform1i(glGetUniformLocation(m_underwaterProgram, "uUnderwaterEnabled"), enableUnderwater ? 1 : 0);
+            glUniform1i(glGetUniformLocation(m_underwaterProgram, "uCinematicEnabled"), wantCinematic ? 1 : 0);
+
+            glBindVertexArray(m_fullscreenVao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindVertexArray(0);
+
+            glEnable(GL_DEPTH_TEST);
+        }
+    }
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -1409,31 +2348,96 @@ void Renderer::createEnvironmentResources() {
     glEnableVertexAttribArray(2);
     m_cloudIndexCount = static_cast<int>(cloudIndices.size());
 
-    // Default terrain plane.
-    static constexpr float terrainY = -0.76f;
-    static constexpr float terrainSize = 220.0f;
-    const float terrainVertices[] = {
-        -terrainSize, terrainY, -terrainSize,
-         terrainSize, terrainY, -terrainSize,
-         terrainSize, terrainY,  terrainSize,
-        -terrainSize, terrainY,  terrainSize,
-    };
-    const unsigned int terrainIndices[] = {
-        0, 1, 2,
-        2, 3, 0,
-    };
+    // Subdivided terrain grid so vertex displacement produces actual height variation.
+    {
+        constexpr int kTerrainN = 160;
+        constexpr float kTerrainSize = 220.0f;
+        const float terrainStep = kTerrainSize * 2.0f / static_cast<float>(kTerrainN);
+        std::vector<float> terrainVertices;
+        std::vector<unsigned int> terrainIndices;
+        terrainVertices.reserve(static_cast<std::size_t>((kTerrainN + 1) * (kTerrainN + 1)) * 3);
+        terrainIndices.reserve(static_cast<std::size_t>(kTerrainN * kTerrainN) * 6);
 
-    glGenVertexArrays(1, &m_terrainVao);
-    glGenBuffers(1, &m_terrainVbo);
-    glGenBuffers(1, &m_terrainEbo);
-    glBindVertexArray(m_terrainVao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_terrainVbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(terrainVertices), terrainVertices, GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_terrainEbo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(terrainIndices), terrainIndices, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * static_cast<int>(sizeof(float)), nullptr);
-    glEnableVertexAttribArray(0);
-    m_terrainIndexCount = 6;
+        for (int row = 0; row <= kTerrainN; ++row) {
+            for (int col = 0; col <= kTerrainN; ++col) {
+                terrainVertices.push_back(-kTerrainSize + static_cast<float>(col) * terrainStep);
+                terrainVertices.push_back(0.0f);
+                terrainVertices.push_back(-kTerrainSize + static_cast<float>(row) * terrainStep);
+            }
+        }
+
+        for (int row = 0; row < kTerrainN; ++row) {
+            for (int col = 0; col < kTerrainN; ++col) {
+                const unsigned int base = static_cast<unsigned int>(row * (kTerrainN + 1) + col);
+                terrainIndices.push_back(base);
+                terrainIndices.push_back(base + 1u);
+                terrainIndices.push_back(base + static_cast<unsigned int>(kTerrainN + 1));
+
+                terrainIndices.push_back(base + 1u);
+                terrainIndices.push_back(base + static_cast<unsigned int>(kTerrainN + 2));
+                terrainIndices.push_back(base + static_cast<unsigned int>(kTerrainN + 1));
+            }
+        }
+
+        glGenVertexArrays(1, &m_terrainVao);
+        glGenBuffers(1, &m_terrainVbo);
+        glGenBuffers(1, &m_terrainEbo);
+        glBindVertexArray(m_terrainVao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_terrainVbo);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<long long>(terrainVertices.size() * sizeof(float)), terrainVertices.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_terrainEbo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<long long>(terrainIndices.size() * sizeof(unsigned int)), terrainIndices.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * static_cast<int>(sizeof(float)), nullptr);
+        glEnableVertexAttribArray(0);
+        m_terrainIndexCount = static_cast<int>(terrainIndices.size());
+    }
+
+    // Water plane – 128×128 subdivided grid for Gerstner wave geometry
+    {
+        constexpr int   kWaterN    = 128;
+        constexpr float kWaterSize = 240.0f;
+        constexpr float kStep      = kWaterSize * 2.0f / static_cast<float>(kWaterN);
+
+        std::vector<float>        wVerts;
+        std::vector<unsigned int> wIdx;
+        wVerts.reserve(static_cast<std::size_t>((kWaterN + 1) * (kWaterN + 1)) * 3);
+        wIdx.reserve(static_cast<std::size_t>(kWaterN * kWaterN) * 6);
+
+        for (int row = 0; row <= kWaterN; ++row) {
+            for (int col = 0; col <= kWaterN; ++col) {
+                wVerts.push_back(-kWaterSize + static_cast<float>(col) * kStep);
+                wVerts.push_back(0.0f);
+                wVerts.push_back(-kWaterSize + static_cast<float>(row) * kStep);
+            }
+        }
+        for (int row = 0; row < kWaterN; ++row) {
+            for (int col = 0; col < kWaterN; ++col) {
+                const unsigned int base = static_cast<unsigned int>(row * (kWaterN + 1) + col);
+                wIdx.push_back(base);
+                wIdx.push_back(base + 1u);
+                wIdx.push_back(base + static_cast<unsigned int>(kWaterN + 2));
+                wIdx.push_back(base);
+                wIdx.push_back(base + static_cast<unsigned int>(kWaterN + 2));
+                wIdx.push_back(base + static_cast<unsigned int>(kWaterN + 1));
+            }
+        }
+
+        glGenVertexArrays(1, &m_waterVao);
+        glGenBuffers(1, &m_waterVbo);
+        glGenBuffers(1, &m_waterEbo);
+        glBindVertexArray(m_waterVao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_waterVbo);
+        glBufferData(GL_ARRAY_BUFFER,
+            static_cast<GLsizeiptr>(wVerts.size() * sizeof(float)),
+            wVerts.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_waterEbo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+            static_cast<GLsizeiptr>(wIdx.size() * sizeof(unsigned int)),
+            wIdx.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * static_cast<int>(sizeof(float)), nullptr);
+        glEnableVertexAttribArray(0);
+        m_waterIndexCount = static_cast<int>(wIdx.size());
+    }
 
     glBindVertexArray(0);
 }
@@ -1472,6 +2476,23 @@ void Renderer::createFramebuffer() {
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // ── Post-process FBO (underwater effect ping-pong target) ──────────────
+    glGenFramebuffers(1, &m_postFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_postFbo);
+
+    glGenTextures(1, &m_postColorTexture);
+    glBindTexture(GL_TEXTURE_2D, m_postColorTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, m_viewportWidth, m_viewportHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_postColorTexture, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        throw std::runtime_error("Post-process framebuffer is not complete.");
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void Renderer::destroyFramebuffer() {
@@ -1488,6 +2509,16 @@ void Renderer::destroyFramebuffer() {
     if (m_fbo != 0) {
         glDeleteFramebuffers(1, &m_fbo);
         m_fbo = 0;
+    }
+
+    if (m_postColorTexture != 0) {
+        glDeleteTextures(1, &m_postColorTexture);
+        m_postColorTexture = 0;
+    }
+
+    if (m_postFbo != 0) {
+        glDeleteFramebuffers(1, &m_postFbo);
+        m_postFbo = 0;
     }
 }
 
@@ -1506,6 +2537,10 @@ void Renderer::rebuildFramebufferIfNeeded(const int width, const int height) {
 
     glBindRenderbuffer(GL_RENDERBUFFER, m_depthStencilRbo);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+
+    // Resize post-process colour texture to match
+    glBindTexture(GL_TEXTURE_2D, m_postColorTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 }
 
 }  // namespace sparks::render
