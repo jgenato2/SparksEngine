@@ -599,6 +599,8 @@ int Application::run() {
                     envChanged |= ImGui::ColorEdit3("Sky Cloud Color", &environmentSettings.skyCloudColor.x);
                     envChanged |= ImGui::SliderFloat("Sky Cloud Amount", &environmentSettings.skyCloudAmount, 0.0f, 1.5f, "%.2f");
                     envChanged |= ImGui::SliderFloat("Sky Cloud Scale", &environmentSettings.skyCloudScale, 0.1f, 8.0f, "%.2f");
+                    envChanged |= ImGui::SliderFloat("Cloud Speed", &environmentSettings.skyCloudSpeed, 0.0f, 4.0f, "%.2f");
+                    envChanged |= ImGui::SliderFloat("Cloud Shadow Strength", &environmentSettings.skyCloudShadowStrength, 0.0f, 1.5f, "%.2f");
                     ImGui::EndMenu();
                 }
 

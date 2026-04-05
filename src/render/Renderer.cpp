@@ -318,14 +318,30 @@ unsigned int createSkydomeProgram() {
         uniform mat4 uMvp;
         out vec3 vLocalPos;
 
+        // --- Simple procedural bird silhouette ---
+        float birdShape(vec2 uv, float t, float scale, float flap) {
+            uv /= scale;
+            float body = smoothstep(0.18, 0.08, length(uv));
+            float wingY = uv.y - 0.12 * sin(uv.x * 7.0 + flap * 2.0);
+            float wings = smoothstep(0.13, 0.04, abs(wingY) - 0.04) * smoothstep(0.18, 0.10, abs(uv.x));
+            return clamp(body + wings, 0.0, 1.0);
+        }
+
         void main() {
             vLocalPos = aPos;
             gl_Position = uMvp * vec4(aPos, 1.0);
         }
     )";
 
-    static constexpr const char* kFragmentShader = R"(
-        #version 460 core
+    static constexpr const char* kFragmentShader = R"(#version 460 core
+        // --- Simple procedural bird silhouette ---
+        float birdShape(vec2 uv, float t, float scale, float flap) {
+            uv /= scale;
+            float body = smoothstep(0.18, 0.08, length(uv));
+            float wingY = uv.y - 0.12 * sin(uv.x * 7.0 + flap * 2.0);
+            float wings = smoothstep(0.13, 0.04, abs(wingY) - 0.04) * smoothstep(0.18, 0.10, abs(uv.x));
+            return clamp(body + wings, 0.0, 1.0);
+        }
         out vec4 FragColor;
 
         in vec3 vLocalPos;
@@ -335,6 +351,8 @@ unsigned int createSkydomeProgram() {
         uniform vec3 uCloudColor;
         uniform float uCloudAmount;
         uniform float uCloudScale;
+        uniform float uCloudSpeed;
+        uniform float uCloudShadowStrength;
         uniform vec3 uSunDir;
         uniform float uSunDiscSize;
         uniform float uSunIntensity;
@@ -344,9 +362,21 @@ unsigned int createSkydomeProgram() {
         uniform vec3 uDustColor;
         uniform float uSunRayStrength;
         uniform float uLensFlareStrength;
+        uniform vec2 uSunScreenPos; // [0,1] screen position of sun for lens flare
         uniform float uTime;
         uniform sampler2D uSkyTex;
         uniform int uUseTexture;
+
+            // --- Watery eye sun glint (bouncing light) ---
+            float sunGlint(vec2 fragCoord, vec2 sunScreen, float strength) {
+                // fragCoord and sunScreen in [0,1]
+                float dist = length(fragCoord - sunScreen);
+                float core = exp(-pow(dist * 16.0, 2.0)); // tight core
+                float bloom = exp(-pow(dist * 5.0, 1.5)); // soft bloom
+                float streak = exp(-abs(fragCoord.x - sunScreen.x) * 18.0) * exp(-pow(dist * 7.0, 2.0));
+                float chroma = exp(-pow(dist * 10.0, 2.0)) * 0.5;
+                return (core * 0.7 + bloom * 0.5 + streak * 0.3 + chroma * 0.2) * strength;
+            }
 
         float hash21(vec2 p) {
             p = fract(p * vec2(127.1, 311.7));
@@ -380,6 +410,9 @@ unsigned int createSkydomeProgram() {
         void main() {
             float h = clamp(vLocalPos.y * 0.5 + 0.5, 0.0, 1.0);
 
+            // Compute screen position for this fragment (approximate)
+            vec2 fragCoord = gl_FragCoord.xy / vec2(textureSize(uSkyTex, 0));
+
             // ── Directions (needed early for cloud sun-shading) ───────────────
             vec3 skyDir = normalize(vLocalPos);
             vec3 sunDir = normalize(uSunDir);
@@ -389,14 +422,19 @@ unsigned int createSkydomeProgram() {
             // Use a clamped plane projection: divide by max(y, minY) so that
             // clouds fill the upper sky hemisphere and stay visually close together.
             // Higher minY clamp = clouds pulled toward zenith (tighter clustering).
-            float yGuard   = max(skyDir.y, 0.12);
+            float minY = 0.28; // was 0.12, increase to fade out lower edge
+            float yGuard = max(skyDir.y, minY);
             vec2  cloudPlane = skyDir.xz / yGuard;
+
+            // Fade out clouds near the bottom of the dome (low y)
+            float bottomFade = smoothstep(minY, minY + 0.10, skyDir.y);
             float cloudSc  = 0.038 * uCloudScale;
             vec2  uv0      = cloudPlane * cloudSc;
 
-            vec2 windA = vec2( 0.018, -0.011) * uTime;
-            vec2 windB = vec2(-0.009,  0.015) * uTime;
-            vec2 windC = vec2( 0.013, -0.021) * uTime;
+            // Move clouds from west (-X) to east (+X) with minimal Z drift
+            vec2 windA = vec2(0.025, 0.0) * uTime * uCloudSpeed;
+            vec2 windB = vec2(0.018, 0.0) * uTime * uCloudSpeed;
+            vec2 windC = vec2(0.012, 0.0) * uTime * uCloudSpeed;
 
             // Domain warp: mild warp so clouds stay clumped but have organic edges.
             float warpX = fbm4Sky(uv0 * 0.55 + windB        + vec2(7.8, 3.1));
@@ -407,10 +445,10 @@ unsigned int createSkydomeProgram() {
             // Lower base frequency = broader, more connected cloud masses.
             float cumBase   = fbm4Sky(warped + windA);
             float cumDetail = fbm4Sky(warped * 2.10 + windC + vec2(4.1, 2.7));
-            float cumDens   = cumBase * 0.75 + cumDetail * 0.25;
-            // Threshold: lower floor so clouds form more readily and stay together.
-            float cumThresh = mix(0.44, 0.58, 1.0 - clamp(uCloudAmount, 0.0, 1.0));
-            float cumAlpha  = smoothstep(cumThresh, cumThresh + 0.14, cumDens);
+            // Increase detail blending and soften threshold to avoid dashed/rainy look
+            float cumDens   = cumBase * 0.60 + cumDetail * 0.40;
+            float cumThresh = mix(0.38, 0.54, 1.0 - clamp(uCloudAmount, 0.0, 1.0));
+            float cumAlpha  = smoothstep(cumThresh, cumThresh + 0.18, cumDens);
 
             // Cirrus layer: slightly larger scale so cirrus bands are continuous.
             vec2  uvCi    = cloudPlane * cloudSc * 0.55 + windA * 1.75;
@@ -419,16 +457,18 @@ unsigned int createSkydomeProgram() {
             float cirAlpha = smoothstep(0.48, 0.64, cirA * 0.60 + cirB * 0.40) * 0.52;
 
             // Fade both layers away near the horizon to prevent hard skyline edge.
-            float horizFade = smoothstep(0.0, 0.22, skyDir.y);
-            cumAlpha  *= horizFade;
-            cirAlpha  *= horizFade;
+            // Make clouds reach the horizon and vanish smoothly
+            float horizFade = smoothstep(0.0, 0.08, skyDir.y); // fade starts closer to horizon
+            cumAlpha  *= horizFade * bottomFade;
+            cirAlpha  *= horizFade * bottomFade;
 
             // ── Cloud shading ────────────────────────────────────────────────
-            // Sun-facing side of clouds is up to ~40 % brighter
+
+            // Sun-facing side of clouds is brighter; clouds are affected by sun direction and intensity
             float sunFacing   = dot(skyDir, sunDir) * 0.5 + 0.5;
             float cloudBright = mix(0.74, 1.14, sunFacing);
             // Thick cumulus self-shadows its own base
-            float selfShadow  = 1.0 - cumAlpha * 0.30;
+            float selfShadow  = 1.0 - cumAlpha * (0.15 + 0.55 * clamp(uCloudShadowStrength, 0.0, 1.5));
 
             // Silver lining: thin bright edge where cloud backlights against sun
             float sunVisibility = smoothstep(0.01, 0.14, sunDir.y);
@@ -437,6 +477,7 @@ unsigned int createSkydomeProgram() {
             float silver      = silverEntry * silverMask * clamp(sunDir.y * 4.0, 0.0, 1.0) * sunVisibility;
 
             vec3  cloudLit    = uCloudColor * cloudBright * selfShadow;
+            // Sun color and intensity add silver lining to clouds
             cloudLit         += uSunColor * uSunIntensity * silver * 0.28;
             // Cirrus has a slightly blue-grey tint from zenith colour bleed
             vec3  cirrusColor = mix(uCloudColor, uZenithColor * 1.10, 0.40);
@@ -448,7 +489,43 @@ unsigned int createSkydomeProgram() {
             color = mix(color, cloudLit,    cumAlpha  * cloudAmt);
             color = mix(color, cirrusColor, cirAlpha  * cloudAmt);
 
+            // ── Procedural distant birds (silhouettes) ─────────────────────
+            // Only show birds above horizon, far from zenith
+            float birdBand = smoothstep(0.18, 0.38, skyDir.y) * (1.0 - smoothstep(0.72, 0.92, skyDir.y));
+            float birdAlpha = 0.0;
+            float t = uTime * 0.18;
+            // Animate 5 birds with different orbits and speeds
+            for (int i = 0; i < 5; ++i) {
+                float birdSeed = float(i) * 13.7;
+                float orbit = t * (0.7 + 0.2 * float(i)) + birdSeed;
+                float azim = orbit + sin(orbit * 0.7 + birdSeed) * 0.5;
+                float elev = mix(0.22, 0.38, fract(sin(birdSeed) * 43758.23));
+                float dist = mix(0.82, 0.98, fract(cos(birdSeed) * 15731.77));
+                // Spherical to cartesian
+                vec3 birdPos = vec3(cos(azim) * cos(elev), sin(elev), sin(azim) * cos(elev)) * dist;
+                float dotView = dot(skyDir, normalize(birdPos));
+                // Project to screen: only render if close to view direction
+                if (dotView > 0.998) {
+                    // 2D offset in tangent plane
+                    vec3 tangent = normalize(cross(vec3(0,1,0), skyDir));
+                    vec3 bitangent = cross(skyDir, tangent);
+                    vec3 rel = normalize(birdPos) - skyDir;
+                    float u = dot(rel, tangent) * 60.0;
+                    float v = dot(rel, bitangent) * 60.0;
+                    float flap = sin(t * 2.0 + float(i) * 1.7);
+                    float bird = birdShape(vec2(u, v), t + float(i) * 0.7, 1.0 + float(i) * 0.18, flap);
+                    birdAlpha += bird * birdBand * 0.7;
+                }
+            }
+            birdAlpha = clamp(birdAlpha, 0.0, 1.0);
+            color = mix(color, vec3(0.08, 0.08, 0.10), birdAlpha);
+
             // Sun disc, halo, rays, lens flare
+
+            // --- Watery eye sun glint (bouncing light) ---
+            float glint = sunGlint(fragCoord, uSunScreenPos, clamp(uLensFlareStrength, 0.0, 2.5) * 1.2);
+            vec3 glintColor = mix(uSunColor, vec3(1.0, 0.98, 0.92), 0.45);
+            color += glintColor * uSunIntensity * glint;
             float upperHemisphereMask = smoothstep(0.02, 0.30, h) * smoothstep(-0.02, 0.18, skyDir.y);
             vec3 refAxis = (abs(sunDir.y) > 0.96) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
             vec3 sunRight = normalize(cross(refAxis, sunDir));
@@ -484,7 +561,10 @@ unsigned int createSkydomeProgram() {
             float lensHalo = pow(clamp(1.0 - sunPlaneLen * 4.0, 0.0, 1.0), 4.5) * 0.08;
             float lensShimmer = pow(clamp(1.0 - sunPlaneLen * 5.2, 0.0, 1.0), 5.0) * (0.55 + 0.45 * sin(uTime * 1.25 + sunAngle * 9.0));
             float lensRingPulse = (0.72 + 0.28 * sin(uTime * 0.75 + sunPlaneLen * 36.0));
-            float lensGain = clamp(uLensFlareStrength, 0.0, 2.5);
+            float lensGain = clamp(uLensFlareStrength, 0.0, 4.0) * 1.5; // Stronger lens flare
+            // Add a strong central orb for cinematic lens effect
+            float lensOrb = exp(-pow(sunPlaneLen * 6.0, 2.0)) * 0.45 * lensGain;
+            vec3 orbColor = mix(uSunColor, vec3(1.0, 0.95, 0.85), 0.55);
             float chromaRing = smoothstep(0.22, 0.11, sunPlaneLen) * (1.0 - smoothstep(0.14, 0.06, sunPlaneLen));
             float petalMask = pow(abs(cos(sunAngle * 6.0)), 6.0) * pow(clamp(1.0 - sunPlaneLen * 6.0, 0.0, 1.0), 2.5);
             float anamorphic = pow(clamp(1.0 - abs(sunPlane.y) * 28.0, 0.0, 1.0), 5.5) * pow(clamp(1.0 - sunPlaneLen * 2.6, 0.0, 1.0), 2.0);
@@ -495,10 +575,11 @@ unsigned int createSkydomeProgram() {
 
             float sunFxMask = upperHemisphereMask * sunVisibility;
             color += uSunColor * uSunIntensity * sunFxMask * (sunDisc * 0.85 + (sunHalo + sunRays) * flarePulse + streakH * 0.05 + streakV * 0.03);
-            color += lensColor * uSunIntensity * sunFxMask * ((lensRingOuter * 0.08 + lensRingInner * 0.05) * lensRingPulse + lensHalo + lensShimmer * 0.16) * lensGain;
-            color += chromaColor * uSunIntensity * sunFxMask * chromaRing * (0.05 * lensGain);
-            color += petalColor * uSunIntensity * sunFxMask * petalMask * (0.06 * lensGain);
-            color += vec3(1.0, 0.96, 0.90) * uSunIntensity * sunFxMask * anamorphic * (0.04 * lensGain);
+            color += lensColor * uSunIntensity * sunFxMask * ((lensRingOuter * 0.16 + lensRingInner * 0.10) * lensRingPulse + lensHalo * 1.5 + lensShimmer * 0.32 + lensOrb);
+            color += chromaColor * uSunIntensity * sunFxMask * chromaRing * (0.10 * lensGain);
+            color += petalColor * uSunIntensity * sunFxMask * petalMask * (0.12 * lensGain);
+            color += vec3(1.0, 0.96, 0.90) * uSunIntensity * sunFxMask * anamorphic * (0.08 * lensGain);
+            color += orbColor * uSunIntensity * sunFxMask * lensOrb;
 
             float horizon = 1.0 - h;
             float dustForward = smoothstep(0.0, 0.98, sunDot);
@@ -1848,6 +1929,8 @@ void Renderer::render(const ViewControls& viewControls) {
         const int skySunHeatLoc = glGetUniformLocation(m_skydomeProgram, "uSunHeatStrength");
         const int skyDustAmountLoc = glGetUniformLocation(m_skydomeProgram, "uDustAmount");
         const int skyDustColorLoc = glGetUniformLocation(m_skydomeProgram, "uDustColor");
+        const int skyCloudSpeedLoc = glGetUniformLocation(m_skydomeProgram, "uCloudSpeed");
+        const int skyCloudShadowStrengthLoc = glGetUniformLocation(m_skydomeProgram, "uCloudShadowStrength");
         const int skySunRayStrengthLoc = glGetUniformLocation(m_skydomeProgram, "uSunRayStrength");
         const int skyLensFlareStrengthLoc = glGetUniformLocation(m_skydomeProgram, "uLensFlareStrength");
         const int skyTimeLoc = glGetUniformLocation(m_skydomeProgram, "uTime");
@@ -1859,6 +1942,8 @@ void Renderer::render(const ViewControls& viewControls) {
         glUniform3f(skyCloudColorLoc, m_environmentSettings.skyCloudColor.r, m_environmentSettings.skyCloudColor.g, m_environmentSettings.skyCloudColor.b);
         glUniform1f(skyCloudAmountLoc, m_environmentSettings.enableCloudObjects ? m_environmentSettings.skyCloudAmount : m_environmentSettings.skyCloudAmount * 0.68f);
         glUniform1f(skyCloudScaleLoc, m_environmentSettings.skyCloudScale);
+        glUniform1f(skyCloudSpeedLoc, m_environmentSettings.skyCloudSpeed);
+        glUniform1f(skyCloudShadowStrengthLoc, m_environmentSettings.skyCloudShadowStrength);
         glUniform3f(skySunDirLoc, m_environmentSettings.terrainLightDirection.x, m_environmentSettings.terrainLightDirection.y, m_environmentSettings.terrainLightDirection.z);
         glUniform1f(skySunDiscSizeLoc, m_environmentSettings.sunDiscSize);
         glUniform1f(skySunIntensityLoc, m_environmentSettings.enableSun ? m_environmentSettings.sunIntensity : 0.0f);
@@ -1867,7 +1952,26 @@ void Renderer::render(const ViewControls& viewControls) {
         glUniform1f(skyDustAmountLoc, m_environmentSettings.dustAmount);
         glUniform3f(skyDustColorLoc, m_environmentSettings.dustColor.r, m_environmentSettings.dustColor.g, m_environmentSettings.dustColor.b);
         glUniform1f(skySunRayStrengthLoc, m_environmentSettings.sunRayStrength);
-        glUniform1f(skyLensFlareStrengthLoc, m_environmentSettings.lensFlareStrength);
+        // --- Lens flare visibility based on camera angle to sun ---
+        // Project sun direction to screen space (after cameraPos is defined)
+        {
+            glm::vec3 sunDir = glm::normalize(m_environmentSettings.terrainLightDirection);
+            glm::vec3 sunWorld = cameraPos + sunDir * 1000.0f; // 1000 units away
+            glm::vec4 sunClip = projection * view * glm::vec4(sunWorld, 1.0f);
+            glm::vec2 sunScreen = glm::vec2(sunClip.x, sunClip.y) / std::max(sunClip.w, 0.0001f);
+            // Convert to [0,1] range (NDC to screen)
+            glm::vec2 sunScreen01 = sunScreen * 0.5f + 0.5f;
+            // Compute distance from screen center (0.5,0.5)
+            float distToCenter = glm::length(sunScreen01 - glm::vec2(0.5f, 0.5f));
+            // Fade lens flare: strongest at center, fades out toward edges
+            float lensFlareVisibility = glm::clamp(1.0f - distToCenter * 2.0f, 0.0f, 1.0f);
+            // Hide if sun is behind camera
+            if (sunClip.w < 0.0f) lensFlareVisibility = 0.0f;
+            glUniform1f(skyLensFlareStrengthLoc, m_environmentSettings.lensFlareStrength * lensFlareVisibility);
+            // Optionally pass sunScreen01 to shader for texture overlay
+            const int skySunScreenLoc = glGetUniformLocation(m_skydomeProgram, "uSunScreenPos");
+            glUniform2f(skySunScreenLoc, sunScreen01.x, sunScreen01.y);
+        }
         glUniform1f(skyTimeLoc, elapsedSeconds);
         glUniform1i(skyTexLoc, 0);
         glUniform1i(skyUseTexLoc, m_hasSkydomeTexture ? 1 : 0);

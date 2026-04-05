@@ -69,6 +69,8 @@ struct EnvironmentSettings {
     glm::vec3 skyCloudColor{0.95f, 0.97f, 1.0f};
     float skyCloudAmount{0.32f};
     float skyCloudScale{1.0f};
+    float skyCloudSpeed{1.0f};
+    float skyCloudShadowStrength{0.7f};
     bool enableSun{true};
     float sunDiscSize{1.0f};
     float sunIntensity{1.0f};
