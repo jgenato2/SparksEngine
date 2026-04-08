@@ -1,3 +1,9 @@
+#define GLM_ENABLE_EXPERIMENTAL
+#include <string>
+#include <map>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #pragma once
 
 #include <cstdint>
