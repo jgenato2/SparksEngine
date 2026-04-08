@@ -352,6 +352,7 @@ unsigned int createSkydomeProgram() {
         uniform float uCloudAmount;
         uniform float uCloudScale;
         uniform float uCloudSpeed;
+        uniform vec2 uCloudWindDir; // normalized wind direction (e.g., (1,0) east, (0,1) north)
         uniform float uCloudShadowStrength;
         uniform vec3 uSunDir;
         uniform float uSunDiscSize;
@@ -422,19 +423,19 @@ unsigned int createSkydomeProgram() {
             // Use a clamped plane projection: divide by max(y, minY) so that
             // clouds fill the upper sky hemisphere and stay visually close together.
             // Higher minY clamp = clouds pulled toward zenith (tighter clustering).
-            float minY = 0.28; // was 0.12, increase to fade out lower edge
+            float minY = -0.08; // allow clouds to reach lower horizon
             float yGuard = max(skyDir.y, minY);
             vec2  cloudPlane = skyDir.xz / yGuard;
 
-            // Fade out clouds near the bottom of the dome (low y)
-            float bottomFade = smoothstep(minY, minY + 0.10, skyDir.y);
+            // Fade out clouds only just below the horizon
+            float bottomFade = smoothstep(minY, minY + 0.04, skyDir.y);
             float cloudSc  = 0.038 * uCloudScale;
             vec2  uv0      = cloudPlane * cloudSc;
 
-            // Move clouds from west (-X) to east (+X) with minimal Z drift
-            vec2 windA = vec2(0.025, 0.0) * uTime * uCloudSpeed;
-            vec2 windB = vec2(0.018, 0.0) * uTime * uCloudSpeed;
-            vec2 windC = vec2(0.012, 0.0) * uTime * uCloudSpeed;
+            // Move clouds in realistic wind direction and speed
+            vec2 windA = uCloudWindDir * 0.025 * uTime * uCloudSpeed;
+            vec2 windB = uCloudWindDir * 0.018 * uTime * uCloudSpeed;
+            vec2 windC = uCloudWindDir * 0.012 * uTime * uCloudSpeed;
 
             // Domain warp: mild warp so clouds stay clumped but have organic edges.
             float warpX = fbm4Sky(uv0 * 0.55 + windB        + vec2(7.8, 3.1));
@@ -456,9 +457,8 @@ unsigned int createSkydomeProgram() {
             float cirB    = fbm4Sky(uvCi * 1.60       + vec2(8.1, 1.9));
             float cirAlpha = smoothstep(0.48, 0.64, cirA * 0.60 + cirB * 0.40) * 0.52;
 
-            // Fade both layers away near the horizon to prevent hard skyline edge.
-            // Make clouds reach the horizon and vanish smoothly
-            float horizFade = smoothstep(0.0, 0.08, skyDir.y); // fade starts closer to horizon
+            // Fade clouds only at and just below the horizon for realism
+            float horizFade = smoothstep(-0.10, 0.01, skyDir.y); // fade starts just below horizon
             cumAlpha  *= horizFade * bottomFade;
             cirAlpha  *= horizFade * bottomFade;
 
@@ -1781,6 +1781,11 @@ void Renderer::setImportedModelTransform(const glm::vec3& position, const glm::v
 }
 
 void Renderer::setEnvironmentSettings(const EnvironmentSettings& settings) {
+        // Set skydome wind direction uniform if program is valid
+        if (m_skydomeProgram) {
+            glUseProgram(m_skydomeProgram);
+            glUniform2f(glGetUniformLocation(m_skydomeProgram, "uCloudWindDir"), m_environmentSettings.skyCloudWindDir.x, m_environmentSettings.skyCloudWindDir.y);
+        }
     m_environmentSettings = settings;
     m_environmentSettings.skydomeRadius = glm::clamp(m_environmentSettings.skydomeRadius, 20.0f, 4000.0f);
     m_environmentSettings.skyCloudAmount = glm::clamp(m_environmentSettings.skyCloudAmount, 0.0f, 1.5f);
