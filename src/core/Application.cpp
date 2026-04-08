@@ -327,10 +327,71 @@ int Application::run() {
     renderer.setEnvironmentSettings(environmentSettings);
     applyWeatherPreset(weatherPresetIndex);
 
+    // Animation playback state
+    bool animPlaying = true;
+    float animTime = 0.0f;
+    int lastSelectedAnim = -1;
+    float animDuration = 1.0f;
+    int selectedAnimIndex = 0;
+
     while (!glfwWindowShouldClose(m_window)) {
         const double currentTime = glfwGetTime();
         const float deltaSeconds = static_cast<float>(std::clamp(currentTime - previousFrameTime, 0.0, 0.1));
         previousFrameTime = currentTime;
+        // --- Animation playback and bone transform update (runtime) ---
+        if (importedModel.has_value() && !importedModel->animations.empty()) {
+            // Use first animation for now (could be made selectable)
+            selectedAnimIndex = std::clamp(selectedAnimIndex, 0, static_cast<int>(importedModel->animations.size()) - 1);
+            auto& anim = importedModel->animations[selectedAnimIndex];
+            animDuration = anim.duration / std::max(anim.ticksPerSecond, 0.001f);
+            if (animPlaying) {
+                animTime += deltaSeconds;
+                if (animTime > animDuration) animTime = 0.0f;
+            }
+            // Build a map from bone name to channel for fast lookup
+            std::map<std::string, const sparks::render::ImportedModelData::AnimationChannel*> channelMap;
+            for (const auto& ch : anim.channels) {
+                channelMap[ch.boneName] = &ch;
+            }
+            // Resize boneTransforms if needed
+            if (importedModel->boneTransforms.size() != importedModel->boneParentIndices.size())
+                importedModel->boneTransforms.resize(importedModel->boneParentIndices.size(), glm::mat4(1.0f));
+            // For each bone, compute interpolated transform
+            for (size_t i = 0; i < importedModel->boneParentIndices.size(); ++i) {
+                std::string boneName;
+                if (i < importedModel->boneNames.size())
+                    boneName = importedModel->boneNames[i];
+                glm::vec3 pos(0.0f);
+                glm::quat rot(1.0f, 0.0f, 0.0f, 0.0f);
+                glm::vec3 scale(1.0f);
+                // Find channel for this bone
+                auto it = channelMap.find(boneName);
+                if (it != channelMap.end()) {
+                    const auto& keyframes = it->second->keyframes;
+                    // Find two keyframes to interpolate
+                    if (!keyframes.empty()) {
+                        const float t = animTime * anim.ticksPerSecond;
+                        size_t k0 = 0, k1 = 0;
+                        for (size_t k = 1; k < keyframes.size(); ++k) {
+                            if (keyframes[k].time > t) { k1 = k; k0 = k - 1; break; }
+                        }
+                        if (k1 == 0) { k0 = 0; k1 = 0; }
+                        float t0 = keyframes[k0].time;
+                        float t1 = keyframes[k1].time;
+                        float alpha = (t1 > t0) ? (t - t0) / (t1 - t0) : 0.0f;
+                        pos = glm::mix(keyframes[k0].position, keyframes[k1].position, alpha);
+                        rot = glm::slerp(keyframes[k0].rotation, keyframes[k1].rotation, alpha);
+                        scale = glm::mix(keyframes[k0].scale, keyframes[k1].scale, alpha);
+                    }
+                }
+                glm::mat4 local = glm::translate(glm::mat4(1.0f), pos) * glm::mat4_cast(rot) * glm::scale(glm::mat4(1.0f), scale);
+                int parent = importedModel->boneParentIndices[i];
+                if (parent >= 0 && parent < static_cast<int>(i))
+                    importedModel->boneTransforms[i] = importedModel->boneTransforms[parent] * local;
+                else
+                    importedModel->boneTransforms[i] = local;
+            }
+        }
 
         glfwPollEvents();
 

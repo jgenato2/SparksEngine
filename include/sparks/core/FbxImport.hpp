@@ -9,10 +9,20 @@
 
 namespace sparks::core {
 
+
+struct FbxAnimationSettings {
+    bool importAnimations = true;
+    float animationSampleRate = 30.0f;
+    bool importAllAnimations = true;
+    int selectedAnimationIndex = 0;
+    // Add more settings as needed
+};
+
 std::optional<render::ImportedModelData> loadFbxModel(
     const std::string& filePath,
     std::string& errorMessage,
     std::vector<rigging::RigBone>* importedRigBones,
-    std::vector<rigging::VertexGroupInfo>* importedVertexGroups);
+    std::vector<rigging::VertexGroupInfo>* importedVertexGroups,
+    const FbxAnimationSettings* animationSettings = nullptr);
 
 }  // namespace sparks::core

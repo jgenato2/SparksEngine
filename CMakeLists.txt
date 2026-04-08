@@ -1,3 +1,5 @@
+# Add tools folder
+add_subdirectory(tools)
 cmake_minimum_required(VERSION 3.26)
 cmake_policy(SET CMP0091 NEW)
 project(SparksEngine VERSION 0.1.0 LANGUAGES CXX)
@@ -118,13 +120,31 @@ add_executable(SparksEngine
 
 target_include_directories(SparksEngine PRIVATE
   include
+  # Assimp headers
   ${assimp_SOURCE_DIR}/include
+  ${assimp_SOURCE_DIR}/include/assimp
+  # GLM headers
+  ${glm_SOURCE_DIR}
+  ${glm_SOURCE_DIR}/glm
+  ${glm_SOURCE_DIR}/glm/gtx
+  ${glm_SOURCE_DIR}/glm/gtc
+  # stb_image.h
+  ${stb_SOURCE_DIR}
+  # imgui
   ${imgui_SOURCE_DIR}
   ${imgui_SOURCE_DIR}/backends
-  ${stb_SOURCE_DIR}
+  # tinyfiledialogs
   ${tinyfiledialogs_SOURCE_DIR}
+  # FBX SDK include directory
+  "C:/Program Files/Autodesk/FBX/FBX SDK/2020.3.9/include"
 )
 target_link_libraries(SparksEngine PRIVATE glfw glm::glm glad imgui_lib tinyfiledialogs_lib assimp OpenGL::GL)
+
+# FBX SDK linking (Windows only)
+if (MSVC)
+  target_link_directories(SparksEngine PRIVATE "C:/Program Files/Autodesk/FBX/FBX SDK/2020.3.9/lib/x64/release")
+  target_link_libraries(SparksEngine PRIVATE libfbxsdk-md.lib libxml2-md.lib zlib-md.lib legacy_stdio_definitions.lib user32.lib)
+endif()
 
 if(MSVC)
   set_property(TARGET SparksEngine PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")

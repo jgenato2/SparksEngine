@@ -22,8 +22,33 @@ struct ViewControls {
 };
 
 struct ImportedModelData {
+    // --- Animation/Bone Data ---
+    std::vector<std::string> boneNames;
+    struct Keyframe {
+        float time;
+        glm::vec3 position;
+        glm::quat rotation;
+        glm::vec3 scale;
+    };
+    struct AnimationChannel {
+        std::string boneName;
+        std::vector<Keyframe> keyframes;
+    };
+    struct AnimationClip {
+        std::string name;
+        float duration = 0.0f;
+        float ticksPerSecond = 1.0f;
+        std::vector<AnimationChannel> channels;
+    };
+    std::vector<AnimationClip> animations;
+    std::vector<glm::mat4> boneTransforms;
+    std::vector<int> boneParentIndices;
+    // Mesh/vertex data
     std::vector<float> vertices; // interleaved: position(3), normal(3), uv(2)
     std::vector<unsigned int> indices;
+    // Skinning data: 4 bone indices and 4 weights per vertex (same order as vertices)
+    std::vector<uint8_t> boneIndices; // 4 per vertex
+    std::vector<float> boneWeights;   // 4 per vertex
     std::vector<unsigned char> textureRgba;
     int textureWidth{1};
     int textureHeight{1};

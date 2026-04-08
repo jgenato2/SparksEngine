@@ -1,4 +1,6 @@
+
 #include "sparks/core/ApplicationUi.hpp"
+#include "sparks/core/FbxImport.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +19,8 @@
 #include <glm/gtx/quaternion.hpp>
 
 namespace sparks::core::ui {
+
+using sparks::core::FbxAnimationSettings;
 namespace {
 
 constexpr float kMinCameraZoom = 1.5f;
@@ -296,8 +300,125 @@ void drawSceneTab(
     }
 
     const ImVec2 viewportSize = ImGui::GetContentRegionAvail();
-    const int viewportWidth = static_cast<int>(viewportSize.x > 1.0f ? viewportSize.x : 1.0f);
-    const int viewportHeight = static_cast<int>(viewportSize.y > 1.0f ? viewportSize.y : 1.0f);
+    const int viewportWidth = static_cast<int>((viewportSize.x > 1.0f) ? viewportSize.x : 1.0f);
+    const int viewportHeight = static_cast<int>((viewportSize.y > 1.0f) ? viewportSize.y : 1.0f);
+
+
+    // --- FBX Animation Import Settings UI ---
+    static FbxAnimationSettings fbxAnimSettings;
+    static bool animPlaying = false;
+    static float animTime = 0.0f;
+    static float animDuration = 1.0f; // Set from actual animation
+    static int lastSelectedAnim = -1;
+
+    if (ImGui::CollapsingHeader("FBX Animation Import Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Import Animations", &fbxAnimSettings.importAnimations);
+        ImGui::InputFloat("Sample Rate (Hz)", &fbxAnimSettings.animationSampleRate, 1.0f, 5.0f, "%.1f");
+        ImGui::Checkbox("Import All Animations", &fbxAnimSettings.importAllAnimations);
+        int numAnims = (importedModel ? static_cast<int>(importedModel->animations.size()) : 0);
+        if (numAnims > 0) {
+            // Build animation name list
+            std::vector<const char*> animNames;
+            animNames.reserve(numAnims);
+            for (const auto& anim : importedModel->animations) {
+                animNames.push_back(anim.name.c_str());
+            }
+            int selectedAnim = std::clamp(fbxAnimSettings.selectedAnimationIndex, 0, numAnims - 1);
+            if (ImGui::Combo("Available Animations", &selectedAnim, animNames.data(), numAnims)) {
+                fbxAnimSettings.selectedAnimationIndex = selectedAnim;
+            }
+            // Reset playback time if animation changed
+            if (selectedAnim != lastSelectedAnim) {
+                animTime = 0.0f;
+                lastSelectedAnim = selectedAnim;
+            }
+            // Show current animation name and index
+            ImGui::Text("Current: [%d] %s", selectedAnim, animNames[selectedAnim]);
+
+            // --- Detailed Animation Stack/Channel List ---
+            if (ImGui::TreeNode("Animation Stack Details (FBX Structure)")) {
+                for (int i = 0; i < numAnims; ++i) {
+                    const auto& anim = importedModel->animations[i];
+                    if (ImGui::TreeNode((std::string("[Stack] ") + anim.name).c_str())) {
+                        ImGui::Text("Duration: %.2f, Ticks/s: %.2f, Channels: %d", anim.duration, anim.ticksPerSecond, (int)anim.channels.size());
+                        for (const auto& channel : anim.channels) {
+                            if (ImGui::TreeNode((std::string("[Node] ") + channel.boneName).c_str())) {
+                                ImGui::Text("Keyframes: %d", (int)channel.keyframes.size());
+                                ImGui::TreePop();
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+                }
+                ImGui::TreePop();
+            }
+        } else if (!fbxAnimSettings.importAllAnimations) {
+            ImGui::InputInt("Selected Animation Index", &fbxAnimSettings.selectedAnimationIndex);
+        }
+
+        // --- Animation Playback Controls ---
+        int selectedAnimIndex = 0;
+        if (importedModel && !importedModel->animations.empty()) {
+            // Clamp selected animation index to available animations
+            selectedAnimIndex = std::clamp(fbxAnimSettings.selectedAnimationIndex, 0, static_cast<int>(importedModel->animations.size()) - 1);
+            animDuration = importedModel->animations[selectedAnimIndex].duration / std::max(importedModel->animations[selectedAnimIndex].ticksPerSecond, 0.001f);
+        }
+        if (ImGui::Button(animPlaying ? "Pause" : "Play")) {
+            animPlaying = !animPlaying;
+        }
+        ImGui::SameLine();
+        ImGui::SliderFloat("Time", &animTime, 0.0f, animDuration, "%.2f");
+        if (importedModel && !importedModel->animations.empty()) {
+            auto& anim = importedModel->animations[selectedAnimIndex];
+            // Build a map from bone name to channel for fast lookup
+            std::map<std::string, const render::ImportedModelData::AnimationChannel*> channelMap;
+            for (const auto& ch : anim.channels) {
+                channelMap[ch.boneName] = &ch;
+            }
+            // Resize boneTransforms if needed
+            if (importedModel->boneTransforms.size() != importedModel->boneParentIndices.size())
+                importedModel->boneTransforms.resize(importedModel->boneParentIndices.size(), glm::mat4(1.0f));
+            // For each bone, compute interpolated transform
+            for (size_t i = 0; i < importedModel->boneParentIndices.size(); ++i) {
+                std::string boneName;
+                if (i < importedModel->boneNames.size())
+                    boneName = importedModel->boneNames[i];
+                glm::vec3 pos(0.0f);
+                glm::quat rot(1.0f, 0.0f, 0.0f, 0.0f);
+                glm::vec3 scale(1.0f);
+                // Find channel for this bone
+                auto it = channelMap.find(boneName);
+                if (it != channelMap.end()) {
+                    const auto& keyframes = it->second->keyframes;
+                    // Find two keyframes to interpolate
+                    if (!keyframes.empty()) {
+                        const float t = animTime * anim.ticksPerSecond;
+                        size_t k0 = 0, k1 = 0;
+                        for (size_t k = 1; k < keyframes.size(); ++k) {
+                            if (keyframes[k].time > t) { k1 = k; k0 = k - 1; break; }
+                        }
+                        if (k1 == 0) { k0 = 0; k1 = 0; }
+                        float t0 = keyframes[k0].time;
+                        float t1 = keyframes[k1].time;
+                        float alpha = (t1 > t0) ? (t - t0) / (t1 - t0) : 0.0f;
+                        pos = glm::mix(keyframes[k0].position, keyframes[k1].position, alpha);
+                        rot = glm::slerp(keyframes[k0].rotation, keyframes[k1].rotation, alpha);
+                        scale = glm::mix(keyframes[k0].scale, keyframes[k1].scale, alpha);
+                    }
+                }
+                glm::mat4 local = glm::translate(glm::mat4(1.0f), pos) * glm::mat4_cast(rot) * glm::scale(glm::mat4(1.0f), scale);
+                int parent = importedModel->boneParentIndices[i];
+                if (parent >= 0 && parent < static_cast<int>(i))
+                    importedModel->boneTransforms[i] = importedModel->boneTransforms[parent] * local;
+                else
+                    importedModel->boneTransforms[i] = local;
+            }
+        }
+        if (animPlaying) {
+            animTime += ImGui::GetIO().DeltaTime;
+            if (animTime > animDuration) animTime = 0.0f;
+        }
+    }
 
     if (importedModel.has_value()) {
         updateFloatingImportedModel(*importedModel, environmentSettings, renderer);
@@ -1598,7 +1719,7 @@ void drawRightPane(
         bool floatChanged = false;
         transformChanged |= ImGui::DragFloat3("Position", &importedModel->position.x, 0.01f, -1000.0f, 1000.0f);
         transformChanged |= ImGui::DragFloat3("Rotation", &importedModel->rotationEulerDegrees.x, 0.5f, -360.0f, 360.0f);
-        transformChanged |= ImGui::DragFloat3("Scale", &importedModel->scale.x, 0.01f, 0.001f, 1000.0f, "%.3f");
+        transformChanged |= ImGui::DragFloat3("Scale (X/Y/Z)", &importedModel->scale.x, 0.01f, 0.001f, 1000.0f, "%.3f");
         ImGui::Text("Dimensions: %s", formatVec3(importedModelWorldDimensions(*importedModel)).c_str());
         ImGui::Separator();
         floatChanged |= ImGui::Checkbox("Float On Water", &importedModel->floatOnWater);
