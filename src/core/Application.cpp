@@ -661,8 +661,6 @@ int Application::run() {
                     envChanged |= ImGui::SliderFloat("Sky Cloud Amount", &environmentSettings.skyCloudAmount, 0.0f, 1.5f, "%.2f");
                     envChanged |= ImGui::SliderFloat("Sky Cloud Scale", &environmentSettings.skyCloudScale, 0.1f, 8.0f, "%.2f");
                     envChanged |= ImGui::SliderFloat("Cloud Speed", &environmentSettings.skyCloudSpeed, 0.0f, 4.0f, "%.2f");
-                    envChanged |= ImGui::SliderFloat2("Cloud Wind Dir", &environmentSettings.skyCloudWindDir.x, -1.0f, 1.0f, "%.2f");
-                    if (glm::length(environmentSettings.skyCloudWindDir) < 0.01f) environmentSettings.skyCloudWindDir = glm::vec2(1.0f, 0.0f);
                     envChanged |= ImGui::SliderFloat("Cloud Shadow Strength", &environmentSettings.skyCloudShadowStrength, 0.0f, 1.5f, "%.2f");
                     ImGui::EndMenu();
                 }

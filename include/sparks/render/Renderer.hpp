@@ -101,7 +101,6 @@ struct EnvironmentSettings {
     float skyCloudAmount{0.32f};
     float skyCloudScale{1.0f};
     float skyCloudSpeed{1.0f};
-    glm::vec2 skyCloudWindDir{1.0f, 0.0f}; // Default: eastward
     float skyCloudShadowStrength{0.7f};
     bool enableSun{true};
     float sunDiscSize{1.0f};
