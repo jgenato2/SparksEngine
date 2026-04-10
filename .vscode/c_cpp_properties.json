@@ -16,7 +16,7 @@
         "${workspaceFolder}/build/gladsources/glad/include"
       ],
       "configurationProvider": "ms-vscode.cmake-tools",
-      "cppStandard": "c++23",
+      "cppStandard": "c++20",
       "intelliSenseMode": "windows-msvc-x64"
     }
   ]

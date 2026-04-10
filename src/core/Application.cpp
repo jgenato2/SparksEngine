@@ -8,6 +8,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <map>
 #include <vector>
 
 #include <glad/gl.h>

@@ -1,6 +1,91 @@
+// --- Cloud shadow map raymarching integration ---
+#include "sparks/render/Renderer.hpp"
+#include <glad/gl.h>
+#include <GLFW/glfw3.h>
+#include <glm/common.hpp>
+#include <glm/ext/matrix_clip_space.hpp>
+#include <glm/ext/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <fstream>
+void sparks::render::Renderer::loadCloudShadowMapShader() {
+    // Load shader source from file
+    std::ifstream file("src/render/CloudShadowMapShader.glsl");
+    std::string shaderSrc((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const char* src = shaderSrc.c_str();
+    m_cloudShadowMapProgram = glCreateProgram();
+    unsigned int vs = glCreateShader(GL_VERTEX_SHADER);
+    const char* vsSrc = "#version 460 core\nout vec2 vUv;\nvoid main() { float x = float((gl_VertexID & 1) << 2) - 1.0; float y = float((gl_VertexID & 2) << 1) - 1.0; vUv = vec2(x * 0.5 + 0.5, y * 0.5 + 0.5); gl_Position = vec4(x, y, 0.0, 1.0); }";
+    glShaderSource(vs, 1, &vsSrc, nullptr);
+    glCompileShader(vs);
+    unsigned int fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, 1, &src, nullptr);
+    glCompileShader(fs);
+    glAttachShader(m_cloudShadowMapProgram, vs);
+    glAttachShader(m_cloudShadowMapProgram, fs);
+    glLinkProgram(m_cloudShadowMapProgram);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    m_cloudShadowMapSunViewProjLoc = glGetUniformLocation(m_cloudShadowMapProgram, "uSunViewProj");
+    m_cloudShadowMapTimeLoc = glGetUniformLocation(m_cloudShadowMapProgram, "uTime");
+    m_cloudShadowMapBaseLoc = glGetUniformLocation(m_cloudShadowMapProgram, "uCloudBase");
+    m_cloudShadowMapTopLoc = glGetUniformLocation(m_cloudShadowMapProgram, "uCloudTop");
+    m_cloudShadowMapDensityLoc = glGetUniformLocation(m_cloudShadowMapProgram, "uCloudDensity");
+}
+
+void sparks::render::Renderer::renderCloudShadowMap(float time, const glm::vec3& sunDir) {
+    // Set up sun view/proj matrix (orthographic)
+    float orthoSize = 120.0f;
+    glm::mat4 sunProj = glm::ortho(-orthoSize, orthoSize, -orthoSize, orthoSize, -60.0f, 120.0f);
+    glm::vec3 sunPos = -sunDir * 60.0f;
+    glm::mat4 sunView = glm::lookAt(sunPos, glm::vec3(0,0,0), glm::vec3(0,1,0));
+    m_sunViewProj = sunProj * sunView;
+    glBindFramebuffer(GL_FRAMEBUFFER, m_cloudShadowFbo);
+    glViewport(0, 0, m_cloudShadowMapSize, m_cloudShadowMapSize);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(m_cloudShadowMapProgram);
+    glUniformMatrix4fv(m_cloudShadowMapSunViewProjLoc, 1, GL_FALSE, glm::value_ptr(m_sunViewProj));
+    glUniform1f(m_cloudShadowMapTimeLoc, time);
+    glUniform1f(m_cloudShadowMapBaseLoc, 30.0f); // cloud base height
+    glUniform1f(m_cloudShadowMapTopLoc, 60.0f);  // cloud top height
+    glUniform1f(m_cloudShadowMapDensityLoc, 1.0f); // density scale
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void sparks::render::Renderer::initializeCloudShadowMap(int size) {
+    m_cloudShadowMapSize = size;
+    if (m_cloudShadowFbo != 0) {
+        glDeleteFramebuffers(1, &m_cloudShadowFbo);
+        m_cloudShadowFbo = 0;
+    }
+    if (m_cloudShadowTex != 0) {
+        glDeleteTextures(1, &m_cloudShadowTex);
+        m_cloudShadowTex = 0;
+    }
+    glGenFramebuffers(1, &m_cloudShadowFbo);
+    glGenTextures(1, &m_cloudShadowTex);
+    glBindTexture(GL_TEXTURE_2D, m_cloudShadowTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, size, size, 0, GL_RED, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_cloudShadowFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_cloudShadowTex, 0);
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        throw std::runtime_error("Cloud shadow framebuffer incomplete");
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
 #include "sparks/render/Renderer.hpp"
 
 #include <algorithm>
+#include <type_traits>
+#include <iterator>
+#include <limits>
+#include <utility>
 #include <chrono>
 #include <cstdint>
 #include <random>

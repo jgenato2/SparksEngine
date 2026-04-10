@@ -1,10 +1,6 @@
-#define GLM_ENABLE_EXPERIMENTAL
 #include <string>
-#include <map>
-#include <glm/gtc/quaternion.hpp>
-#include <glm/gtx/quaternion.hpp>
-#include <glm/gtc/matrix_transform.hpp>
 #pragma once
+
 
 #include <cstdint>
 #include <vector>
@@ -12,10 +8,13 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
+#include <glm/mat4x4.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include "sparks/render/WeatherRenderer.hpp"
 
 namespace sparks::render {
+
 
 struct ViewControls {
     float zoomDistance{4.0f};
@@ -57,6 +56,11 @@ struct ImportedModelData {
     std::vector<float> boneWeights;   // 4 per vertex
     std::vector<unsigned char> textureRgba;
     int textureWidth{1};
+
+        // --- Cloud shadow mapping resources ---
+        void loadCloudShadowMapShader();
+        void renderCloudShadowMap(float time, const glm::vec3& sunDir);
+        void initializeCloudShadowMap(int size = 1024);
     int textureHeight{1};
     float opacity{1.0f};
     bool alphaBlend{false};
@@ -183,6 +187,11 @@ public:
 
     unsigned int viewportTexture() const { return m_usePostProcessed ? m_postColorTexture : m_colorTexture; }
 
+    // --- Cloud shadow mapping resources ---
+    void loadCloudShadowMapShader();
+    void renderCloudShadowMap(float time, const glm::vec3& sunDir);
+    void initializeCloudShadowMap(int size = 1024);
+
 private:
     void createGridResources();
     void createEnvironmentResources();
@@ -291,6 +300,19 @@ private:
 
     int m_viewportWidth{1280};
     int m_viewportHeight{720};
+
+    // Cloud shadow map shader program
+    unsigned int m_cloudShadowMapProgram = 0;
+    int m_cloudShadowMapSunViewProjLoc = -1;
+    int m_cloudShadowMapTimeLoc = -1;
+    int m_cloudShadowMapBaseLoc = -1;
+    int m_cloudShadowMapTopLoc = -1;
+    int m_cloudShadowMapDensityLoc = -1;
+
+    unsigned int m_cloudShadowFbo = 0;
+    unsigned int m_cloudShadowTex = 0;
+    int m_cloudShadowMapSize = 1024;
+    glm::mat4 m_sunViewProj = glm::mat4(1.0f);
 };
 
 }  // namespace sparks::render

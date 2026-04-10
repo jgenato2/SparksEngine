@@ -1,4 +1,3 @@
-
 #include "sparks/core/ApplicationUi.hpp"
 #include "sparks/core/FbxImport.hpp"
 
@@ -10,6 +9,7 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <map>
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/ext/matrix_clip_space.hpp>
@@ -17,6 +17,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <glm/gtx/quaternion.hpp>
+#include <glm/glm.hpp>
 
 namespace sparks::core::ui {
 

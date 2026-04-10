@@ -1,4 +1,5 @@
 #include "sparks/core/ApplicationImport.hpp"
+#include "sparks/render/Renderer.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -111,9 +112,9 @@ void importFbxFromDialog(
 
     importStatus = std::string("Imported: ")
         + std::filesystem::path(selectedPath).filename().string()
-        + " | Pos " + formatVec3(imported->position)
-        + " | Rot " + formatVec3(imported->rotationEulerDegrees)
-        + " | Scale " + formatVec3(imported->scale)
+        + " | Pos " + formatVec3(imported.value().position)
+        + " | Rot " + formatVec3(imported.value().rotationEulerDegrees)
+        + " | Scale " + formatVec3(imported.value().scale)
         + " | Dim " + formatVec3(importedModelWorldDimensions(*imported))
         + " | Bones " + std::to_string(importedRigBones.size());
 }
