@@ -1,29 +1,53 @@
 {
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "CMake: Configure (vs2026)",
-      "type": "shell",
-      "command": "cmake",
-      "args": ["--preset", "vs2026"],
-      "group": "build",
-      "problemMatcher": []
-    },
-    {
-      "label": "CMake: Build Release",
-      "type": "shell",
-      "command": "cmake",
-      "args": ["--build", "--preset", "build-release"],
-      "dependsOn": ["CMake: Configure (vs2026)"],
-      "group": "build",
-      "problemMatcher": ["$msCompile"]
-    },
-    {
-      "label": "Run: SparksEngine (Release)",
-      "type": "shell",
-      "command": "./build/Release/SparksEngine.exe",
-      "dependsOn": ["CMake: Build Release"],
-      "problemMatcher": []
-    }
-  ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "CMake: Configure (vs2026)",
+			"type": "shell",
+			"command": "cmake",
+			"args": [
+				"--preset",
+				"vs2026"
+			],
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "CMake: Build Release",
+			"type": "shell",
+			"command": "cmake",
+			"args": [
+				"--build",
+				"--preset",
+				"build-release"
+			],
+			"dependsOn": [
+				"CMake: Configure (vs2026)"
+			],
+			"group": "build",
+			"problemMatcher": [
+				"$msCompile"
+			]
+		},
+		{
+			"label": "Run: SparksEngine (Release)",
+			"type": "shell",
+			"command": "./build/Release/SparksEngine.exe",
+			"dependsOn": [
+				"CMake: Build Release"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "CMake: Build Debug",
+			"type": "shell",
+			"command": "cmake",
+			"args": [
+				"--build",
+				"--preset",
+				"build-debug"
+			],
+			"group": "build"
+		}
+	]
 }

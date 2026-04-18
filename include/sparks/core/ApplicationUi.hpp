@@ -77,4 +77,8 @@ void drawRightPane(
     std::optional<render::ImportedModelData>& importedModel,
     bool& importedModelSelected);
 
+
+// Global FPS variable for status bar
+extern float gStatusBarFps;
+
 }  // namespace sparks::core::ui

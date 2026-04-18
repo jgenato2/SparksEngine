@@ -15,6 +15,14 @@
 
 namespace sparks::render {
 
+struct StarData {
+    glm::vec3 direction;
+    glm::vec3 color;
+    float twinklePhase;
+    float twinkleAmp;
+    float radius;
+};
+
 
 struct ViewControls {
     float zoomDistance{4.0f};
@@ -97,8 +105,15 @@ struct CloudObjectSettings {
 };
 
 struct EnvironmentSettings {
+            float starDensity{0.05f}; // 0 = none, 0.1 = sparse, 1 = max
+        // Real-world sun and wind parameters
+        float latitude{0.0f};      // Degrees, -90 to 90
+        float longitude{0.0f};     // Degrees, -180 to 180
+        float utcTime{0.0f};       // Decimal hours since midnight UTC
+        glm::vec2 windDirection{1.0f, 0.0f}; // XZ wind direction, normalized
+        float windSpeed{2.0f};     // m/s
     bool enableSkydome{true};
-    float skydomeRadius{220.0f};
+    float skydomeRadius{800.0f};
     glm::vec3 skyHorizonColor{0.70f, 0.82f, 0.95f};
     glm::vec3 skyZenithColor{0.35f, 0.55f, 0.82f};
     glm::vec3 skyCloudColor{0.95f, 0.97f, 1.0f};
@@ -117,6 +132,9 @@ struct EnvironmentSettings {
     glm::vec3 dustColor{0.92f, 0.80f, 0.62f};
     float sunRayStrength{1.18f};
     float lensFlareStrength{0.92f};
+    // New skydome shader parameters
+    float sunHaloSize{0.18f};
+    float sunHaloStrength{0.7f};
 
     bool enableFog{true};
     glm::vec3 fogColor{0.67f, 0.75f, 0.83f};
@@ -143,6 +161,7 @@ struct EnvironmentSettings {
     float waterOpacity{0.42f};
     float waveAmplitude{0.18f};
     float waveFrequency{2.0f};
+    float waterFoamIntensity{1.0f};
 
     bool enableCinematic{false};
 };
@@ -155,6 +174,8 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
+    // Precomputed star data for skydome
+    std::vector<StarData> m_starList;
     void initialize();
     void setViewportSize(int width, int height);
     void setImportedModel(const ImportedModelData& model);

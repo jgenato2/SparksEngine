@@ -114,7 +114,18 @@ add_executable(SparksEngine
   src/core/WeatherSystem.cpp
   src/core/Rigging.cpp
   src/render/Renderer.cpp
+  src/render/ShaderFacade.cpp
+  src/render/shaders/textured/TexturedProgram.cpp
+  src/render/shaders/skydome/SkydomeProgram.cpp
+  src/render/shaders/terrain/TerrainProgram.cpp
+  src/render/shaders/water/WaterProgram.cpp
+  src/render/shaders/cloud/CloudProgram.cpp
+  src/render/shaders/underwater/UnderwaterProgram.cpp
   src/render/WeatherRenderer.cpp
+  src/render/terrain/DiamondSquareTerrain.cpp
+  src/render/CloudShadowMap.cpp
+  src/render/terrain/TerrainUtils.cpp
+  src/render/GLUtils.cpp
   src/ui/PropertyPanel.cpp
 )
 
@@ -140,15 +151,30 @@ target_include_directories(SparksEngine PRIVATE
 )
 target_link_libraries(SparksEngine PRIVATE glfw glm::glm glad imgui_lib tinyfiledialogs_lib assimp OpenGL::GL)
 
+
 # FBX SDK linking (Windows only)
 if (MSVC)
-  target_link_directories(SparksEngine PRIVATE "C:/Program Files/Autodesk/FBX/FBX SDK/2020.3.9/lib/x64/release")
-  target_link_libraries(SparksEngine PRIVATE libfbxsdk-md.lib libxml2-md.lib zlib-md.lib legacy_stdio_definitions.lib user32.lib)
+  target_link_directories(SparksEngine PRIVATE
+    $<$<CONFIG:Debug>:C:/Program Files/Autodesk/FBX/FBX SDK/2020.3.9/lib/x64/debug>
+    $<$<CONFIG:Release>:C:/Program Files/Autodesk/FBX/FBX SDK/2020.3.9/lib/x64/release>
+    $<TARGET_FILE_DIR:SparksEngine>
+  )
+  target_link_libraries(SparksEngine PRIVATE
+    libfbxsdk-md.lib
+    libxml2-md.lib
+    zlib-md.lib
+    legacy_stdio_definitions.lib
+    user32.lib
+  )
 endif()
 
 if(MSVC)
   set_property(TARGET SparksEngine PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-  target_compile_options(SparksEngine PRIVATE /W4 /permissive-)
+  target_compile_options(SparksEngine PRIVATE /W4 /permissive- /FS)
+  target_compile_options(glfw PRIVATE /FS)
+  target_compile_options(imgui_lib PRIVATE /FS)
+  target_compile_options(glad PRIVATE /FS)
+  target_compile_options(tinyfiledialogs_lib PRIVATE /FS)
   target_link_options(SparksEngine PRIVATE /NODEFAULTLIB:LIBCMT)
 else()
   target_compile_options(SparksEngine PRIVATE -Wall -Wextra -Wpedantic)

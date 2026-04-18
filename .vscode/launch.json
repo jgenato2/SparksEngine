@@ -2,6 +2,19 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Launch Debug (SparksEngine)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Debug/SparksEngine.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": true,
+      "preLaunchTask": "CMake: Build Debug",
+      "console": "integratedTerminal"
+    },
+    {
       "name": "Launch SparksEngine (Release)",
       "type": "cppvsdbg",
       "request": "launch",
