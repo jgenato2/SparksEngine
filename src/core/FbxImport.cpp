@@ -203,35 +203,37 @@ namespace sparks::core
                             render::ImportedModelData::AnimationChannel channel;
                             channel.boneName = node->GetName();
                             // Collect all unique key times
-                            std::set<float> keyTimes;
+                            std::set<double> keyTimes;
                             auto addCurveTimes = [&](FbxAnimCurve* curve) {
                                 if (!curve) return;
                                 for (int k = 0; k < curve->KeyGetCount(); ++k) {
-                                    keyTimes.insert(static_cast<float>(curve->KeyGetTime(k).GetSecondDouble()));
+                                    keyTimes.insert(curve->KeyGetTime(k).GetSecondDouble());
                                 }
                             };
                             addCurveTimes(tCurveX); addCurveTimes(tCurveY); addCurveTimes(tCurveZ);
                             addCurveTimes(rCurveX); addCurveTimes(rCurveY); addCurveTimes(rCurveZ);
                             addCurveTimes(sCurveX); addCurveTimes(sCurveY); addCurveTimes(sCurveZ);
                             // For each key time, sample the transform
-                            for (float t : keyTimes) {
+                            for (double t : keyTimes) {
                                 render::ImportedModelData::Keyframe kf;
-                                kf.time = t;
+                                kf.time = static_cast<float>(t);
+                                FbxTime sampleTime;
+                                sampleTime.SetSecondDouble(t);
                                 // Translation
-                                double tx = tCurveX ? tCurveX->Evaluate(t) : node->LclTranslation.Get()[0];
-                                double ty = tCurveY ? tCurveY->Evaluate(t) : node->LclTranslation.Get()[1];
-                                double tz = tCurveZ ? tCurveZ->Evaluate(t) : node->LclTranslation.Get()[2];
+                                double tx = tCurveX ? tCurveX->Evaluate(sampleTime) : node->LclTranslation.Get()[0];
+                                double ty = tCurveY ? tCurveY->Evaluate(sampleTime) : node->LclTranslation.Get()[1];
+                                double tz = tCurveZ ? tCurveZ->Evaluate(sampleTime) : node->LclTranslation.Get()[2];
                                 kf.position = glm::vec3(static_cast<float>(tx), static_cast<float>(ty), static_cast<float>(tz));
                                 // Rotation (FBX is in degrees)
-                                double rx = rCurveX ? rCurveX->Evaluate(t) : node->LclRotation.Get()[0];
-                                double ry = rCurveY ? rCurveY->Evaluate(t) : node->LclRotation.Get()[1];
-                                double rz = rCurveZ ? rCurveZ->Evaluate(t) : node->LclRotation.Get()[2];
+                                double rx = rCurveX ? rCurveX->Evaluate(sampleTime) : node->LclRotation.Get()[0];
+                                double ry = rCurveY ? rCurveY->Evaluate(sampleTime) : node->LclRotation.Get()[1];
+                                double rz = rCurveZ ? rCurveZ->Evaluate(sampleTime) : node->LclRotation.Get()[2];
                                 glm::vec3 rotRad = glm::radians(glm::vec3(static_cast<float>(rx), static_cast<float>(ry), static_cast<float>(rz)));
                                 kf.rotation = glm::quat(rotRad);
                                 // Scaling
-                                double sx = sCurveX ? sCurveX->Evaluate(t) : node->LclScaling.Get()[0];
-                                double sy = sCurveY ? sCurveY->Evaluate(t) : node->LclScaling.Get()[1];
-                                double sz = sCurveZ ? sCurveZ->Evaluate(t) : node->LclScaling.Get()[2];
+                                double sx = sCurveX ? sCurveX->Evaluate(sampleTime) : node->LclScaling.Get()[0];
+                                double sy = sCurveY ? sCurveY->Evaluate(sampleTime) : node->LclScaling.Get()[1];
+                                double sz = sCurveZ ? sCurveZ->Evaluate(sampleTime) : node->LclScaling.Get()[2];
                                 kf.scale = glm::vec3(static_cast<float>(sx), static_cast<float>(sy), static_cast<float>(sz));
                                 channel.keyframes.push_back(kf);
                             }

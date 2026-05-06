@@ -1,5 +1,5 @@
-#include "UnderwaterProgram.hpp"
-#include "../../GLUtils.hpp"
+#include "sparks/render/shaders/underwater/UnderwaterProgram.hpp"
+#include "sparks/render/GLUtils.hpp"
 #include <glad/gl.h>
 #include <string>
 

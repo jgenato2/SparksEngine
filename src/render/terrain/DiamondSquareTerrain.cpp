@@ -1,5 +1,5 @@
 #pragma once
-#include "DiamondSquareTerrain.hpp"
+#include "sparks/render/terrain/DiamondSquareTerrain.hpp"
 #include <algorithm>
 #include <random>
 #include <vector>

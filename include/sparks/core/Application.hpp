@@ -1,5 +1,7 @@
 #pragma once
 
+
+#include "sparks/render/Renderer.hpp"
 struct GLFWwindow;
 
 namespace sparks::core {
@@ -20,6 +22,7 @@ private:
     void shutdownImGui();
 
     GLFWwindow* m_window{nullptr};
+    sparks::render::EnvironmentSettings m_environmentSettings;
 };
 
 }  // namespace sparks::core

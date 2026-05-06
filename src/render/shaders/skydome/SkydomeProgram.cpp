@@ -1,5 +1,5 @@
-#include "SkydomeProgram.hpp"
-#include "../../GLUtils.hpp"
+#include "sparks/render/shaders/skydome/SkydomeProgram.hpp"
+#include "sparks/render/GLUtils.hpp"
 #include <glad/gl.h>
 #include <string>
 
@@ -33,6 +33,8 @@ unsigned int createSkydomeProgram() {
         uniform vec3 uCloudColor;
         uniform float uCloudAmount;
         uniform float uCloudScale;
+        uniform float uCloudSpeed;
+        uniform float uCloudShadowStrength;
         uniform vec3 uSunDir;
         uniform float uSunDiscSize;
         uniform float uSunIntensity;
@@ -68,7 +70,7 @@ unsigned int createSkydomeProgram() {
             float v = 0.0;
             float a = 0.55;
             mat2 rot = mat2(0.80, -0.60, 0.60, 0.80);
-            for (int i = 0; i < 4; ++i) {
+            for (int i = 0; i < 4; ++i) { // reduced octaves for performance
                 v += a * noise2Sky(p);
                 p = rot * p * 2.02 + vec2(1.37, -0.91);
                 a *= 0.5;
@@ -123,14 +125,14 @@ unsigned int createSkydomeProgram() {
             // Randomize star size and shine
             float sizeRand = hash21(tile + 8.3);
             float shineRand = hash21(tile + 9.7);
-            float starRadius = mix(0.00004, 0.00010, sizeRand); // ultra tiny, far-away stars
-            float discEdge = starRadius * mix(1.05, 1.18, sizeRand); // ultra tiny halo
+            float starRadius = mix(0.000008, 0.000018, sizeRand); // clamp upper bound further
+            float discEdge = starRadius * mix(1.03, 1.08, sizeRand); // even tinier halo
 
             // Twinkle: random phase and amplitude per star
             float t = uTime;
             float twinklePhase = hash21(tile + 5.7) * 6.2831853; // [0, 2pi]
             float twinkleAmp = mix(0.5, 1.0, shineRand); // random twinkle amplitude
-            float twinkle = 0.7 + twinkleAmp * sin(t * 0.7 + twinklePhase); // slower twinkle
+            float twinkle = 0.7 + twinkleAmp * sin(t * 0.2 + twinklePhase); // much slower twinkle
             // Only render stars in upper dome
             if (viewTheta > 1.5707963) {
                 haloOut = 0.0;
@@ -142,9 +144,9 @@ unsigned int createSkydomeProgram() {
             float c2 = hash21(tile + 2.7);
             starColor = vec3(1.0, 0.95 + 0.1 * c1, 0.9 + 0.2 * c2);
             float coreDisc = smoothstep(starRadius, starRadius * 0.7, angularDist);
-                float glareStrength = mix(2.0, 4.0, shineRand); // much lower glare for bloom
-                float coreStrength = mix(3.0, 5.0, shineRand); // much lower core for bloom
-                float haloStrength = mix(0.7, 1.5, shineRand); // much lower halo
+                float glareStrength = mix(0.5, 1.2, shineRand); // much lower glare for bloom
+                float coreStrength = mix(1.0, 2.0, shineRand); // much lower core for bloom
+                float haloStrength = mix(0.2, 0.5, shineRand); // much lower halo
 
             // --- 4-point star glare ---
             // Spherical coordinates for pixel and star
@@ -168,15 +170,15 @@ unsigned int createSkydomeProgram() {
             // Attenuate near the pole to avoid distortion
             float poleFade = smoothstep(0.0, 0.25, abs(starThetaG - 1.5707963));
             starburst *= poleFade;
-            starburst *= 10.0 * twinkle * glareStrength;
+            starburst *= 4.0 * twinkle * glareStrength;
 
                 float glare = pow(coreDisc, 16.0) * glareStrength + starburst;
                 // Add a soft, wide halo for extra bloom
-                float wideHalo = smoothstep(0.008, 0.003, angularDist) * 0.18 * twinkle;
+                float wideHalo = smoothstep(0.008, 0.003, angularDist) * 0.08 * twinkle;
             core = (coreDisc * coreStrength + glare) * twinkle;
                 halo = (smoothstep(discEdge, starRadius, angularDist) * haloStrength + wideHalo) * twinkle;
             haloOut = halo;
-            return core * 4.0;
+            return core;
         }
 
         void main() {
@@ -191,27 +193,63 @@ unsigned int createSkydomeProgram() {
             vec3 sunDir = normalize(uSunDir);
             float sunDot = max(dot(skyDir, sunDir), 0.0);
 
-            // Sky gradient
-            vec3 color = mix(uHorizonColor, uZenithColor, pow(h, 0.62));
+            // Deep, saturated blue sky
+            vec3 deepSky = mix(vec3(0.22, 0.44, 0.92), vec3(0.10, 0.22, 0.62), pow(h, 1.2));
+            vec3 color = mix(uHorizonColor, deepSky, pow(h, 0.62));
 
             // Environmental bloom: brighten sky near sun based on sun intensity
-            float envBloom = pow(sunDot, 8.0) * clamp(uSunIntensity, 0.0, 2.0); // sharper, more intense near sun
+            float envBloom = pow(sunDot, 8.0) * clamp(uSunIntensity, 0.0, 2.0);
             color += uSunColor * envBloom * 0.5;
 
-            // Clouds (simplified, no lighting for brevity)
-            float yGuard = max(skyDir.y, 0.12);
-            vec2 cloudPlane = skyDir.xz / yGuard;
+            // --- Fluffy, pure white clouds ---
+            float minY = 0.18;
+            float blend = smoothstep(0.0, minY * 2.0, abs(skyDir.y));
+            float safeY = mix(minY, abs(skyDir.y), blend);
+            vec2 zenithUV = skyDir.xz / safeY;
+            vec2 horizonUV = normalize(skyDir.xz) * (1.0 - abs(skyDir.y));
+            vec2 cloudUV = mix(horizonUV, zenithUV, blend);
             float cloudSc = 0.038 * uCloudScale;
-            vec2 uv0 = cloudPlane * cloudSc;
-            float cumBase = fbm4Sky(uv0);
-            float cumAlpha = smoothstep(0.44, 0.58, cumBase);
-            color = mix(color, uCloudColor, cumAlpha * clamp(uCloudAmount, 0.0, 1.5));
+            vec2 uv0 = cloudUV * cloudSc;
+            float timeShift = uTime * uCloudSpeed;
+            float fbm1 = fbm4Sky(uv0 + vec2(timeShift, 0.0));
+            float fbm2 = fbm4Sky(uv0 * 2.3 + vec2(timeShift * 0.5, 0.0));
+            float fbm3 = fbm4Sky(uv0 * 4.1 + vec2(timeShift * 0.2, 0.0));
+            float cloudShape = (fbm1 * 0.50 + fbm2 * 0.32 + fbm3 * 0.18); // rebalanced for 3 layers
+            float cloudCoverage = 0.44 + 0.18 * (1.0 - clamp(uCloudAmount, 0.0, 1.5));
+            // Softer, rounder edge for fluffy look
+            float cumAlpha = pow(smoothstep(cloudCoverage, cloudCoverage + 0.10, cloudShape), 1.08);
+            float shadowStrength = clamp(uCloudShadowStrength, 0.0, 1.0);
+            // Soft blue shadow, no gray
+            vec3 shadowBase = mix(color, vec3(0.68, 0.80, 1.00), 0.55);
+            // Volumetric: bright white tops, soft blue bottoms
+            float upness = clamp(dot(skyDir, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
+            // Add multi-scattering tint for cotton candy effect
+            float scatterTint = 0.18 * (1.0 - upness) * cumAlpha;
+            vec3 pinkTint = vec3(1.0, 0.82, 0.92);
+            vec3 blueTint = vec3(0.85, 0.92, 1.0);
+            vec3 cloudTop = mix(vec3(1.0, 1.0, 1.0), pinkTint, scatterTint * 0.7);
+            vec3 cloudBottom = mix(vec3(0.92, 0.97, 1.08), blueTint, scatterTint * 0.8);
+            vec3 cloudColor = mix(cloudBottom, cloudTop, upness);
+            // Add extra contrast for depth
+            cloudColor = mix(cloudColor, vec3(1.0), pow(upness, 2.5) * 0.25);
+
+            // --- Backlighting: clouds in front of sun are darker ---
+            float viewToSun = dot(skyDir, sunDir); // 1 = looking at sun, -1 = looking away
+            float backlight = smoothstep(0.2, 0.95, viewToSun); // 0 = away from sun, 1 = directly at sun
+            float backShadow = cumAlpha * backlight * 0.85; // strong effect for thick clouds
+            vec3 backShadowTint = vec3(0.45, 0.48, 0.55); // bluish-gray
+            cloudColor = mix(cloudColor, backShadowTint, backShadow);
+
+            // Blend cloud color with sky using alpha
+            color = mix(color, cloudColor, cumAlpha * clamp(uCloudAmount, 0.0, 1.5));
+            // Add strong shadow to cloud base only (not inside cloud)
+            float shadowImpact = cumAlpha * shadowStrength * (1.0 - upness) * 1.5; // was 0.55, now 1.5 for much stronger effect
+            shadowImpact = clamp(shadowImpact, 0.0, 1.0);
+            color = mix(color, shadowBase, shadowImpact);
 
             // Sun as a soft disc with halo and diamond/cross glare (like star)
             float sizeN = clamp((uSunDiscSize - 0.2) / 7.8, 0.0, 1.0);
-            float discOuter = mix(0.99978, 0.99908, sizeN);
-            float discInner = mix(0.99995, 0.99935, sizeN);
-            float sunRadius = mix(0.012, 0.035, sizeN); // sun angular radius (smaller base size)
+            float sunRadius = mix(0.012, 0.035, sizeN) * 0.10;
             float sunDisc = smoothstep(sunRadius, sunRadius * 0.7, 1.0 - sunDot);
             float sunHalo = smoothstep(sunRadius * 1.2, sunRadius, 1.0 - sunDot);
 

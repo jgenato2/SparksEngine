@@ -1,5 +1,5 @@
-#include "TerrainProgram.hpp"
-#include "../../GLUtils.hpp"
+#include "sparks/render/shaders/terrain/TerrainProgram.hpp"
+#include "sparks/render/GLUtils.hpp"
 #include <glad/gl.h>
 #include <string>
 

@@ -1,4 +1,4 @@
-#include "GLUtils.hpp"
+#include "sparks/render/GLUtils.hpp"
 #include <glad/gl.h>
 #include <string>
 #include <fstream>

@@ -31,7 +31,7 @@ struct ViewControls {
     glm::vec2 panTargetOffset{0.0f, 0.0f};
     float orbitTargetZ{0.0f};
     float orbitTargetZTarget{0.0f};
-    glm::vec2 worldRotationDegrees{0.0f, 0.0f};
+    glm::vec2 worldRotationDegrees{72.0f, 0.0f};
 };
 
 struct ImportedModelData {
@@ -144,7 +144,7 @@ struct EnvironmentSettings {
 
     bool enableTerrain{true};
     float terrainSize{220.0f};
-    float terrainHeight{-0.76f};
+    float terrainHeight{-5.0f};
     glm::vec3 terrainColorA{0.16f, 0.20f, 0.14f};
     glm::vec3 terrainColorB{0.24f, 0.28f, 0.20f};
     float terrainPatchScale{0.12f};

@@ -1,5 +1,5 @@
-#include "TexturedProgram.hpp"
-#include "../../GLUtils.hpp"
+#include "sparks/render/shaders/textured/TexturedProgram.hpp"
+#include "sparks/render/GLUtils.hpp"
 #include <glad/gl.h>
 #include <string>
 

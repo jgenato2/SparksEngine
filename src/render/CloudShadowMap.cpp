@@ -1,4 +1,4 @@
-#include "CloudShadowMap.hpp"
+#include "sparks/render/CloudShadowMap.hpp"
 #include <glad/gl.h>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>

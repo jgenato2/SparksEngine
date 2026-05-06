@@ -1,5 +1,5 @@
-#include "CloudProgram.hpp"
-#include "../../GLUtils.hpp"
+#include "sparks/render/shaders/cloud/CloudProgram.hpp"
+#include "sparks/render/GLUtils.hpp"
 #include <glad/gl.h>
 #include <string>
 

@@ -84,6 +84,20 @@ namespace sparks::core
     {
         initializeWindow();
         initializeImGui();
+        // Set default skydome cloud settings
+        m_environmentSettings.skyCloudAmount = 0.77f;
+        m_environmentSettings.skyCloudScale = 4.84f;
+        m_environmentSettings.skyCloudSpeed = 0.04f;
+        m_environmentSettings.skyCloudShadowStrength = 0.00f;
+
+        // Set default terrain settings
+        m_environmentSettings.terrainSize = 1097.9f;
+        m_environmentSettings.terrainHeight = -5.0f;
+        m_environmentSettings.terrainColorA = glm::vec3(41.0f/255.0f, 51.0f/255.0f, 36.0f/255.0f);
+        m_environmentSettings.terrainColorB = glm::vec3(61.0f/255.0f, 71.0f/255.0f, 51.0f/255.0f);
+        m_environmentSettings.terrainPatchScale = 1.36f;
+        m_environmentSettings.terrainRoughness = 1.30f;
+        m_environmentSettings.fbxShadowSoftness = 1.00f;
     }
 
     Application::~Application()
@@ -136,12 +150,10 @@ namespace sparks::core
         std::array<int, 15> humanoidBoneMap{};
         humanoidBoneMap.fill(-1);
         WeatherSystem weatherSystem;
-        sparks::render::EnvironmentSettings environmentSettings;
+        sparks::render::EnvironmentSettings environmentSettings = m_environmentSettings;
         int weatherPresetIndex = 1;
         glm::vec3 fixedRainCenter(0.0f, 0.0f, 0.0f);
         std::vector<int> selectedCloudIndices;
-        int scatterCloudCount = 8;
-        int scatterSeed = 1337;
         double previousFrameTime = glfwGetTime();
 
         auto applyWeatherPreset = [&](const int presetIndex)
@@ -364,6 +376,11 @@ namespace sparks::core
         static double avgFrameTime = 0.0;
         static int profileFrameCount = 0;
 
+        // Section timing counters
+        static double sectionAnimTime = 0.0, sectionWeatherTime = 0.0, sectionImGuiTime = 0.0;
+        static double sectionRenderTime = 0.0, sectionGLTime = 0.0;
+        static int sectionFrameCount = 0;
+
         while (!glfwWindowShouldClose(m_window))
         {
             const double frameStartTime = glfwGetTime();
@@ -371,22 +388,8 @@ namespace sparks::core
             const float deltaSeconds = static_cast<float>(std::clamp(currentTime - previousFrameTime, 0.0, 0.1));
             previousFrameTime = currentTime;
 
-            // --- Frame timing/profiling ---
-            const double frameTime = glfwGetTime() - frameStartTime;
-            maxFrameTime = std::max(maxFrameTime, frameTime);
-            minFrameTime = std::min(minFrameTime, frameTime);
-            avgFrameTime += frameTime;
-            profileFrameCount++;
-            if (currentTime - lastProfileTime > 2.0) {
-                double avg = (profileFrameCount > 0) ? (avgFrameTime / profileFrameCount) : 0.0;
-                printf("[Frame Profile] min: %.3f ms, max: %.3f ms, avg: %.3f ms\n", minFrameTime * 1000.0, maxFrameTime * 1000.0, avg * 1000.0);
-                lastProfileTime = currentTime;
-                maxFrameTime = 0.0;
-                minFrameTime = 1000.0;
-                avgFrameTime = 0.0;
-                profileFrameCount = 0;
-            }
             // --- Animation playback and bone transform update (runtime) ---
+            double sectionStart = glfwGetTime();
             if (importedModel.has_value() && !importedModel->animations.empty())
             {
                 // Use first animation for now (could be made selectable)
@@ -457,9 +460,11 @@ namespace sparks::core
                         importedModel->boneTransforms[i] = local;
                 }
             }
+            sectionAnimTime += glfwGetTime() - sectionStart;
 
             glfwPollEvents();
 
+                sectionStart = glfwGetTime();
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
@@ -1133,7 +1138,10 @@ namespace sparks::core
             terrainSurface.height = environmentSettings.terrainHeight;
             terrainSurface.patchScale = environmentSettings.terrainPatchScale;
             terrainSurface.roughness = environmentSettings.terrainRoughness;
+            
+            sectionStart = glfwGetTime();
             weatherSystem.update(deltaSeconds, weatherCenter, rainCollisionBoxes, environmentSettings.terrainHeight, terrainSurface);
+            sectionWeatherTime += glfwGetTime() - sectionStart;
             renderer.setWeatherRain(
                 weatherSystem.rainLineVertices(),
                 weatherSystem.splashPoints(),
@@ -1196,7 +1204,6 @@ namespace sparks::core
                         transformDragStartImportedModel,
                         transformDragStartClouds,
                         importedModelSelected);
-
                     ui::drawRiggingTab(
                         rigBones,
                         rigImportedSourceBones,
@@ -1243,6 +1250,9 @@ namespace sparks::core
 
             ImGui::PopStyleVar(2);
 
+            sectionImGuiTime += glfwGetTime() - sectionStart;
+            
+            sectionStart = glfwGetTime();
             ImGui::Render();
 
             int displayWidth = 0;
@@ -1254,6 +1264,25 @@ namespace sparks::core
 
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             glfwSwapBuffers(m_window);
+            sectionGLTime += glfwGetTime() - sectionStart;
+            sectionFrameCount++;
+
+            // Print section profiling every 2 seconds
+            if (glfwGetTime() - lastProfileTime > 2.0) {
+                double totalMs = (sectionAnimTime + sectionWeatherTime + sectionImGuiTime + sectionGLTime) / sectionFrameCount * 1000.0;
+                printf("[Section Profiling] Anim: %.2f ms, Weather: %.2f ms, ImGui: %.2f ms, GL: %.2f ms, Total: %.2f ms (avg per frame)\n",
+                    sectionAnimTime / sectionFrameCount * 1000.0,
+                    sectionWeatherTime / sectionFrameCount * 1000.0,
+                    sectionImGuiTime / sectionFrameCount * 1000.0,
+                    sectionGLTime / sectionFrameCount * 1000.0,
+                    totalMs);
+                lastProfileTime = glfwGetTime();
+                sectionAnimTime = 0.0;
+                sectionWeatherTime = 0.0;
+                sectionImGuiTime = 0.0;
+                sectionGLTime = 0.0;
+                sectionFrameCount = 0;
+            }
         }
 
         return 0;

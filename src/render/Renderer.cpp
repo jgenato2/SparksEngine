@@ -1,9 +1,10 @@
 #include <ctime>
 #include <cmath>
+#include <cstdio>
 
 
 #include <stdexcept>
-#include "terrain/DiamondSquareTerrain.hpp"
+#include "sparks/render/terrain/DiamondSquareTerrain.hpp"
 #include "sparks/render/Renderer.hpp"
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
@@ -11,7 +12,7 @@
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include "CloudShadowMap.hpp"
+#include "sparks/render/CloudShadowMap.hpp"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -26,22 +27,24 @@ namespace sparks::render {
 // Utility: hash function for deterministic randomness (matches shader)
 static float hash21(float x, float y) {
     glm::vec2 p = glm::fract(glm::vec2(x, y) * glm::vec2(127.1f, 311.7f));
-    float f = glm::dot(p, p + 184.75f);
     return glm::fract(p.x * p.y);
 }
 
 // Generate star list (tile-based, matches shader logic)
 std::vector<StarData> generateStarList(int tileU = 16, int tileV = 12) {
     std::vector<StarData> stars;
+    const float tileUf = static_cast<float>(tileU);
+    const float tileVf = static_cast<float>(tileV);
     for (int y = 0; y < tileV; ++y) {
         for (int x = 0; x < tileU; ++x) {
+            const float xf = static_cast<float>(x);
+            const float yf = static_cast<float>(y);
             // Avoid seam: skip tiles near u=0 or u=1
-            float u = (x + 0.5f) / tileU;
+            float u = (xf + 0.5f) / tileUf;
             if (u < 0.04f || u > 0.96f) continue;
-            float v = (y + 0.5f) / tileV;
             // Hash to get star position within tile, avoid edge
-            float starU = (hash21(x + 0.1f, y) * 0.6f + 0.2f) / tileU + x / (float)tileU;
-            float starV = (hash21(x + 0.7f, y) * 0.6f + 0.2f) / tileV + y / (float)tileV;
+            float starU = (hash21(xf + 0.1f, yf) * 0.6f + 0.2f) / tileUf + xf / tileUf;
+            float starV = (hash21(xf + 0.7f, yf) * 0.6f + 0.2f) / tileVf + yf / tileVf;
             float phi = starU * 2.0f * float(M_PI);
             float theta = starV * float(M_PI);
             glm::vec3 dir = glm::vec3(
@@ -50,14 +53,14 @@ std::vector<StarData> generateStarList(int tileU = 16, int tileV = 12) {
                 std::sin(phi) * std::sin(theta)
             );
             // Color variation per star
-            float colorSeed = hash21(x + 17.0f, y);
+            float colorSeed = hash21(xf + 17.0f, yf);
             glm::vec3 color = glm::mix(glm::vec3(1.0f, 0.95f, 0.95f), glm::vec3(0.7f, 0.85f, 1.0f), colorSeed);
             // Twinkle
-            float twinklePhase = hash21(x + 5.7f, y) * 2.0f * float(M_PI);
-            float shineRand = hash21(x + 9.7f, y);
+            float twinklePhase = hash21(xf + 5.7f, yf) * 2.0f * float(M_PI);
+            float shineRand = hash21(xf + 9.7f, yf);
             float twinkleAmp = glm::mix(0.5f, 1.0f, shineRand);
             // Size
-            float sizeRand = hash21(x + 8.3f, y);
+            float sizeRand = hash21(xf + 8.3f, yf);
             float radius = glm::mix(0.00004f, 0.00010f, sizeRand);
             stars.push_back(StarData{dir, color, twinklePhase, twinkleAmp, radius});
         }
@@ -154,8 +157,8 @@ glm::vec3 computeSunDirection(float latitude, float longitude, float utcTime, in
 
 constexpr float kCameraFarPlane = 1000.0f;
 
-#include "GLUtils.hpp"
-#include "ShaderFacade.hpp"
+#include "sparks/render/GLUtils.hpp"
+#include "sparks/render/ShaderFacade.hpp"
 
 unsigned int createCloudProgram()
 {
@@ -1064,6 +1067,27 @@ namespace sparks::render
         glClearColor(0.28f, 0.40f, 0.58f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        enum class GpuProfileSlot : int
+        {
+            Skydome = 0,
+            Terrain,
+            Water,
+            Import,
+            Weather,
+            Total,
+            Count
+        };
+
+        // Profiling timers
+        static double gpuProfileAccumMs[static_cast<int>(GpuProfileSlot::Count)] = {};
+        static int perfFrameCount = 0;
+        static auto lastPerfTime = std::chrono::steady_clock::now();
+        GLuint gpuQueries[static_cast<int>(GpuProfileSlot::Count) - 1] = {};
+        GLuint totalTimestampQueries[2] = {};
+        glGenQueries(static_cast<GLsizei>(GpuProfileSlot::Count) - 1, gpuQueries);
+        glGenQueries(2, totalTimestampQueries);
+        glQueryCounter(totalTimestampQueries[0], GL_TIMESTAMP);
+
         glUseProgram(m_shaderProgram);
 
         const float aspectRatio = static_cast<float>(m_viewportWidth) / static_cast<float>(m_viewportHeight);
@@ -1123,6 +1147,7 @@ namespace sparks::render
             const int skyCloudScaleLoc = glGetUniformLocation(m_skydomeProgram, "uCloudScale");
             const int skyCloudSpeedLoc = glGetUniformLocation(m_skydomeProgram, "uCloudSpeed");
             const int skyCloudColorLoc = glGetUniformLocation(m_skydomeProgram, "uCloudColor");
+            const int skyCloudShadowStrengthLoc = glGetUniformLocation(m_skydomeProgram, "uCloudShadowStrength");
             const int skyWindDirectionLoc = glGetUniformLocation(m_skydomeProgram, "uWindDirection");
             const int skyWindSpeedLoc = glGetUniformLocation(m_skydomeProgram, "uWindSpeed");
             const int skyTimeLoc = glGetUniformLocation(m_skydomeProgram, "uTime");
@@ -1159,6 +1184,7 @@ namespace sparks::render
             glUniform1f(skyCloudScaleLoc, m_environmentSettings.skyCloudScale);
             glUniform1f(skyCloudSpeedLoc, m_environmentSettings.skyCloudSpeed);
             glUniform3f(skyCloudColorLoc, m_environmentSettings.skyCloudColor.r, m_environmentSettings.skyCloudColor.g, m_environmentSettings.skyCloudColor.b);
+            glUniform1f(skyCloudShadowStrengthLoc, m_environmentSettings.skyCloudShadowStrength);
             glUniform2f(skyWindDirectionLoc, m_environmentSettings.windDirection.x, m_environmentSettings.windDirection.y);
             glUniform1f(skyWindSpeedLoc, m_environmentSettings.windSpeed);
             glUniform1f(skyTimeLoc, elapsedSeconds);
@@ -1171,10 +1197,12 @@ namespace sparks::render
             // Patch: Ignore skydome texture to ensure procedural stars are visible
             // (Do not bind skydome texture, always use procedural shader)
 
+            glBeginQuery(GL_TIME_ELAPSED, gpuQueries[static_cast<int>(GpuProfileSlot::Skydome)]);
             glDepthMask(GL_FALSE);
             glBindVertexArray(m_skydomeVao);
             glDrawElements(GL_TRIANGLES, m_skydomeIndexCount, GL_UNSIGNED_INT, nullptr);
             glDepthMask(GL_TRUE);
+            glEndQuery(GL_TIME_ELAPSED);
         }
 
         // --- Terrain rendering (always before water) ---
@@ -1243,9 +1271,11 @@ namespace sparks::render
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, m_terrainTexture);
 
+            glBeginQuery(GL_TIME_ELAPSED, gpuQueries[static_cast<int>(GpuProfileSlot::Terrain)]);
             glBindVertexArray(m_terrainVao);
             glDrawElements(GL_TRIANGLES, m_terrainIndexCount, GL_UNSIGNED_INT, nullptr);
             glBindVertexArray(0);
+            glEndQuery(GL_TIME_ELAPSED);
         }
 
         // --- Water rendering (after terrain) ---
@@ -1294,9 +1324,11 @@ namespace sparks::render
             glUniform1f(waveFrequencyLoc, m_environmentSettings.waveFrequency);
             glUniform1f(waterTimeLoc, elapsedSeconds);
 
+            glBeginQuery(GL_TIME_ELAPSED, gpuQueries[static_cast<int>(GpuProfileSlot::Water)]);
             glBindVertexArray(m_waterVao);
             glDrawElements(GL_TRIANGLES, m_waterIndexCount, GL_UNSIGNED_INT, nullptr);
             glBindVertexArray(0);
+            glEndQuery(GL_TIME_ELAPSED);
 
             // Reset OpenGL state if changed (e.g., blending, depth mask)
             glDisable(GL_BLEND);
@@ -1369,10 +1401,12 @@ namespace sparks::render
                 glDepthMask(GL_FALSE);
             }
 
+            glBeginQuery(GL_TIME_ELAPSED, gpuQueries[static_cast<int>(GpuProfileSlot::Import)]);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, m_importTexture);
             glBindVertexArray(m_importVao);
             glDrawElements(GL_TRIANGLES, m_importIndexCount, GL_UNSIGNED_INT, nullptr);
+            glEndQuery(GL_TIME_ELAPSED);
 
             if (m_importAlphaBlend)
             {
@@ -1386,6 +1420,7 @@ namespace sparks::render
         // Set sun direction to be very far away (distant directional light)
         m_environmentSettings.terrainLightDirection = glm::normalize(glm::vec3(-1.0f, 0.5f, -2.0f));
 
+        glBeginQuery(GL_TIME_ELAPSED, gpuQueries[static_cast<int>(GpuProfileSlot::Weather)]);
         m_weatherRenderer.renderRain(
             projection,
             view,
@@ -1434,11 +1469,52 @@ namespace sparks::render
             m_weatherEnabled,
             m_ripplePointSize,
             m_rippleOpacityScale);
+        glEndQuery(GL_TIME_ELAPSED);
 
         // Reset GL line width after weather rendering
         glLineWidth(1.0f);
 
         glBindVertexArray(0);
+
+        // ── Grid overlay ─────────────────────────────────────────────────────────
+        if (m_shaderProgram != 0 && m_gridVao != 0 && m_gridRegularCount > 0)
+        {
+            glUseProgram(m_shaderProgram);
+            const glm::mat4 gridModel(1.0f);
+            const glm::mat4 gridMvp = projection * view * world * gridModel;
+            glUniformMatrix4fv(glGetUniformLocation(m_shaderProgram, "uMvp"),   1, GL_FALSE, glm::value_ptr(gridMvp));
+            glUniformMatrix4fv(glGetUniformLocation(m_shaderProgram, "uModel"), 1, GL_FALSE, glm::value_ptr(gridModel));
+            glUniform3f(glGetUniformLocation(m_shaderProgram, "uLightPos"),
+                        m_environmentSettings.terrainLightDirection.x * 1000.0f,
+                        m_environmentSettings.terrainLightDirection.y * 1000.0f,
+                        m_environmentSettings.terrainLightDirection.z * 1000.0f);
+            glUniform1f(glGetUniformLocation(m_shaderProgram, "uGradientStrength"), 0.0f);
+
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+
+            glBindVertexArray(m_gridVao);
+
+            // Regular grid lines — subtle grey
+            glUniform3f(glGetUniformLocation(m_shaderProgram, "uColor"), 0.45f, 0.45f, 0.45f);
+            glUniform1f(glGetUniformLocation(m_shaderProgram, "uAlpha"), 0.5f);
+            glDrawArrays(GL_LINES, 0, m_gridRegularCount);
+
+            // X axis — red
+            glUniform3f(glGetUniformLocation(m_shaderProgram, "uColor"), 0.85f, 0.2f, 0.2f);
+            glUniform1f(glGetUniformLocation(m_shaderProgram, "uAlpha"), 0.9f);
+            glDrawArrays(GL_LINES, m_gridAxisXStart, 2);
+
+            // Z axis — blue
+            glUniform3f(glGetUniformLocation(m_shaderProgram, "uColor"), 0.2f, 0.35f, 0.85f);
+            glUniform1f(glGetUniformLocation(m_shaderProgram, "uAlpha"), 0.9f);
+            glDrawArrays(GL_LINES, m_gridAxisYStart, 2);
+
+            glBindVertexArray(0);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
 
         // ── Underwater post-process pass ─────────────────────────────────────────
         // Detect whether the effective camera position in scene-local space is
@@ -1517,6 +1593,41 @@ namespace sparks::render
         }
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glQueryCounter(totalTimestampQueries[1], GL_TIMESTAMP);
+
+        GLuint64 queryResultNs[static_cast<int>(GpuProfileSlot::Count) - 1] = {};
+        for (int queryIndex = 0; queryIndex < static_cast<int>(GpuProfileSlot::Count) - 1; ++queryIndex)
+        {
+            glGetQueryObjectui64v(gpuQueries[queryIndex], GL_QUERY_RESULT, &queryResultNs[queryIndex]);
+            gpuProfileAccumMs[queryIndex] += static_cast<double>(queryResultNs[queryIndex]) / 1000000.0;
+        }
+        GLuint64 totalStartNs = 0;
+        GLuint64 totalEndNs = 0;
+        glGetQueryObjectui64v(totalTimestampQueries[0], GL_QUERY_RESULT, &totalStartNs);
+        glGetQueryObjectui64v(totalTimestampQueries[1], GL_QUERY_RESULT, &totalEndNs);
+        gpuProfileAccumMs[static_cast<int>(GpuProfileSlot::Total)] += static_cast<double>(totalEndNs - totalStartNs) / 1000000.0;
+        glDeleteQueries(static_cast<GLsizei>(GpuProfileSlot::Count) - 1, gpuQueries);
+        glDeleteQueries(2, totalTimestampQueries);
+
+        // Profile reporting every 2 seconds
+        perfFrameCount++;
+        const auto currentTime = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(currentTime - lastPerfTime).count() >= 2.0) {
+            const double avgFrames = std::max(perfFrameCount, 1);
+            fprintf(stdout, "[Renderer GPU Profiling] Skydome: %.2f ms, Terrain: %.2f ms, Water: %.2f ms, Import: %.2f ms, Weather: %.2f ms, Total: %.2f ms (avg per frame in 2s)\n",
+                    gpuProfileAccumMs[static_cast<int>(GpuProfileSlot::Skydome)] / avgFrames,
+                    gpuProfileAccumMs[static_cast<int>(GpuProfileSlot::Terrain)] / avgFrames,
+                    gpuProfileAccumMs[static_cast<int>(GpuProfileSlot::Water)] / avgFrames,
+                    gpuProfileAccumMs[static_cast<int>(GpuProfileSlot::Import)] / avgFrames,
+                    gpuProfileAccumMs[static_cast<int>(GpuProfileSlot::Weather)] / avgFrames,
+                    gpuProfileAccumMs[static_cast<int>(GpuProfileSlot::Total)] / avgFrames);
+            for (double &accumulatedMs : gpuProfileAccumMs)
+            {
+                accumulatedMs = 0.0;
+            }
+            perfFrameCount = 0;
+            lastPerfTime = currentTime;
+        }
     }
 
     void Renderer::createGridResources()
