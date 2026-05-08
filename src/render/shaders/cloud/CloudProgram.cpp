@@ -46,7 +46,9 @@ unsigned int createCloudProgram() {
         uniform float uSunGlowStrength;
         uniform int uWaterEnabled;
         uniform float uWaterLevel;
+        uniform float uWaterHalfExtent;
         uniform vec3 uWaterTint;
+        uniform mat4 uInvWorld;
         uniform vec3 uCameraPos;
         uniform vec3 uFogColor;
         uniform float uFogNear;
@@ -76,21 +78,35 @@ unsigned int createCloudProgram() {
             float sunGlow = pow(ndl, 6.0) * max(uSunGlowStrength, 0.0);
             vec3 color = base.rgb * lit + uEmissive + uSunColor * sunGlow;
 
-            if (uWaterEnabled == 1) {
-                float waterDepth = uWaterLevel - vWorldPos.y;
-                float submerged = smoothstep(0.0, 1.8, waterDepth);
-                float deepSubmerged = smoothstep(0.35, 4.5, waterDepth);
-                float waterline = 1.0 - smoothstep(0.0, 0.08, abs(waterDepth));
-                vec3 underwaterColor = mix(color, uWaterTint * mix(0.82, 1.12, ndl), submerged * 0.58);
-                underwaterColor *= mix(vec3(1.0), vec3(0.72, 0.88, 0.96), deepSubmerged);
-                underwaterColor += vec3(0.07, 0.11, 0.09) * waterline * 0.45;
-                color = underwaterColor;
+            vec3 scenePos = vec3(uInvWorld * vec4(vWorldPos, 1.0));
+            bool insideWaterArea = abs(scenePos.x) <= uWaterHalfExtent && abs(scenePos.z) <= uWaterHalfExtent;
+
+            if (uWaterEnabled == 1 && insideWaterArea) {
+                float waterDepth = uWaterLevel - scenePos.y;
+                if (waterDepth > 0.02) {
+                    float submerged = smoothstep(0.02, 1.8, waterDepth);
+                    float deepSubmerged = smoothstep(0.50, 4.5, waterDepth);
+                    float waterline = 1.0 - smoothstep(0.02, 0.10, waterDepth);
+                    vec3 underwaterColor = mix(color, uWaterTint * mix(0.82, 1.12, ndl), submerged * 0.50);
+                    underwaterColor *= mix(vec3(1.0), vec3(0.72, 0.88, 0.96), deepSubmerged);
+                    underwaterColor += vec3(0.07, 0.11, 0.09) * waterline * 0.22;
+                    color = underwaterColor;
+                }
             }
 
             float fogSpan = max(uFogFar - uFogNear, 0.001);
             float fogT = clamp((distance(vWorldPos, uCameraPos) - uFogNear) / fogSpan, 0.0, 1.0);
             float fogAmount = pow(fogT, 1.25) * clamp(uFogStrength, 0.0, 1.0);
-            color = mix(color, uFogColor, fogAmount);
+            vec3 fogTarget = uFogColor;
+            if (uWaterEnabled == 1 && insideWaterArea) {
+                float heightAboveWater = max(scenePos.y - uWaterLevel, 0.0);
+                float aboveWaterBlend = smoothstep(0.25, 8.0, heightAboveWater);
+                float fogLuma = dot(uFogColor, vec3(0.299, 0.587, 0.114));
+                vec3 desaturatedFog = mix(uFogColor, vec3(fogLuma), 0.40);
+                vec3 landFog = mix(desaturatedFog, color, 0.18);
+                fogTarget = mix(uFogColor, landFog, aboveWaterBlend);
+            }
+            color = mix(color, fogTarget, fogAmount);
 
             FragColor = vec4(color, alpha);
         }

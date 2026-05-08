@@ -90,7 +90,16 @@ unsigned int createUnderwaterProgram() {
             float fogSpan = max(uFogFar - uFogNear, 0.001);
             float fogT = clamp((distance(vWorldPos, uCameraPos) - uFogNear) / fogSpan, 0.0, 1.0);
             float fogAmount = pow(fogT, 1.25) * clamp(uFogStrength, 0.0, 1.0);
-            color = mix(color, uFogColor, fogAmount);
+            vec3 fogTarget = uFogColor;
+            if (uWaterEnabled == 1) {
+                float heightAboveWater = max(vWorldPos.y - uWaterLevel, 0.0);
+                float aboveWaterBlend = smoothstep(0.25, 8.0, heightAboveWater);
+                float fogLuma = dot(uFogColor, vec3(0.299, 0.587, 0.114));
+                vec3 desaturatedFog = mix(uFogColor, vec3(fogLuma), 0.40);
+                vec3 landFog = mix(desaturatedFog, color, 0.22);
+                fogTarget = mix(uFogColor, landFog, aboveWaterBlend);
+            }
+            color = mix(color, fogTarget, fogAmount);
 
             FragColor = vec4(color, alpha);
         }

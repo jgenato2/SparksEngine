@@ -193,13 +193,20 @@ unsigned int createSkydomeProgram() {
             vec3 sunDir = normalize(uSunDir);
             float sunDot = max(dot(skyDir, sunDir), 0.0);
 
-            // Deep, saturated blue sky
-            vec3 deepSky = mix(vec3(0.22, 0.44, 0.92), vec3(0.10, 0.22, 0.62), pow(h, 1.2));
-            vec3 color = mix(uHorizonColor, deepSky, pow(h, 0.62));
+            // Use the configured sky gradient instead of forcing a saturated blue zenith.
+            vec3 skyGradient = mix(uHorizonColor, uZenithColor, pow(h, 0.72));
+            vec3 color = skyGradient;
 
             // Environmental bloom: brighten sky near sun based on sun intensity
             float envBloom = pow(sunDot, 8.0) * clamp(uSunIntensity, 0.0, 2.0);
             color += uSunColor * envBloom * 0.5;
+
+            // Dust haze: stronger near horizon and slightly forward-scattered toward the sun.
+            float dust = clamp(uDustAmount, 0.0, 1.5);
+            float horizonDust = (1.0 - h) * dust;
+            float sunDust = pow(sunDot, 2.8) * dust * 0.55;
+            color = mix(color, uDustColor, clamp(horizonDust * 0.65, 0.0, 1.0));
+            color += uDustColor * sunDust * 0.22;
 
             // --- Fluffy, pure white clouds ---
             float minY = 0.18;
@@ -220,7 +227,7 @@ unsigned int createSkydomeProgram() {
             float cumAlpha = pow(smoothstep(cloudCoverage, cloudCoverage + 0.10, cloudShape), 1.08);
             float shadowStrength = clamp(uCloudShadowStrength, 0.0, 1.0);
             // Soft blue shadow, no gray
-            vec3 shadowBase = mix(color, vec3(0.68, 0.80, 1.00), 0.55);
+            vec3 shadowBase = mix(color, uZenithColor, 0.35);
             // Volumetric: bright white tops, soft blue bottoms
             float upness = clamp(dot(skyDir, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
             // Add multi-scattering tint for cotton candy effect
@@ -228,7 +235,7 @@ unsigned int createSkydomeProgram() {
             vec3 pinkTint = vec3(1.0, 0.82, 0.92);
             vec3 blueTint = vec3(0.85, 0.92, 1.0);
             vec3 cloudTop = mix(vec3(1.0, 1.0, 1.0), pinkTint, scatterTint * 0.7);
-            vec3 cloudBottom = mix(vec3(0.92, 0.97, 1.08), blueTint, scatterTint * 0.8);
+            vec3 cloudBottom = mix(vec3(0.92, 0.95, 0.99), blueTint, scatterTint * 0.45);
             vec3 cloudColor = mix(cloudBottom, cloudTop, upness);
             // Add extra contrast for depth
             cloudColor = mix(cloudColor, vec3(1.0), pow(upness, 2.5) * 0.25);
@@ -237,7 +244,7 @@ unsigned int createSkydomeProgram() {
             float viewToSun = dot(skyDir, sunDir); // 1 = looking at sun, -1 = looking away
             float backlight = smoothstep(0.2, 0.95, viewToSun); // 0 = away from sun, 1 = directly at sun
             float backShadow = cumAlpha * backlight * 0.85; // strong effect for thick clouds
-            vec3 backShadowTint = vec3(0.45, 0.48, 0.55); // bluish-gray
+            vec3 backShadowTint = mix(vec3(0.48, 0.48, 0.50), uZenithColor, 0.18);
             cloudColor = mix(cloudColor, backShadowTint, backShadow);
 
             // Blend cloud color with sky using alpha

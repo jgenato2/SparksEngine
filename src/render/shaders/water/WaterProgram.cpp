@@ -77,6 +77,7 @@ unsigned int createWaterProgram() {
 
         uniform vec3 uSunColor;
         uniform float uSunIntensity;
+        uniform vec3 uLightDir;
         uniform float uOpacity;
         uniform float uAlphaCutoff;
         uniform vec3 uCameraPos;
@@ -86,21 +87,46 @@ unsigned int createWaterProgram() {
         uniform float uFogStrength;
         uniform vec3 uWaterColor;
         uniform float uFoamIntensity;
+        uniform int uReflectionOnly;
+        uniform float uReflectionStrength;
+        uniform mat3 uInvWorldRot;
 
         void main() {
             vec3 n = normalize(vWorldNormal);
             vec3 viewDir = normalize(uCameraPos - vWorldPos);
-            float fresnel = clamp(pow(1.0 - max(dot(n, viewDir), 0.0), 3.0) * 0.65 + 0.35, 0.0, 1.0);
-            // Sun direction (from environment)
-            vec3 sunDir = normalize(vec3(0.2, 1.0, 0.2));
-            float sunDot = max(dot(n, sunDir), 0.0);
-            // Sun highlight (sharper, more realistic)
-            float sunSpec = pow(sunDot, 128.0) * fresnel;
+            float NdotV = max(dot(n, viewDir), 0.0);
+
+            // Fade out completely when the surface is viewed edge-on (nearly
+            // perpendicular to the view ray). This prevents the blue band that
+            // appears when the water plane is visible at the top of the viewport
+            // after orbiting/tilting the view.
+            float edgeFade = smoothstep(0.0, 0.18, NdotV);
+
+            // Fresnel — stronger at grazing angles.
+            float fresnel = clamp(pow(1.0 - NdotV, 4.0), 0.0, 1.0);
+
+            // --- Sun reflection matching the skydome sun direction ---
+            // uLightDir and uCameraPos are both in the same rotated world space as
+            // vWorldPos / vWorldNormal, so RdotV gives the correct sun reflection
+            // that visually tracks the sun disc in the skydome.
+            vec3 sunDir = normalize(uLightDir);
+            float NdotL = max(dot(n, sunDir), 0.0);
+            vec3 reflDir = reflect(-sunDir, n); // reflected sun ray toward viewer
+            float RdotV = max(dot(reflDir, viewDir), 0.0);
+            // Broad lobe (power 48) + tight sparkle (power 256).
+            float sunSpec  = pow(RdotV, 48.0) * NdotL * (0.4 + 0.6 * fresnel);
+            float sparkle  = pow(RdotV, 256.0) * NdotL;
+            // World-stable sparkle mask: stable cell grid in pre-rotation space.
+            vec3 stablePos = uInvWorldRot * vWorldPos;
+            vec2 sparkleCell = floor(stablePos.xz * 0.5);
+            float sparkleNoise = fract(sin(dot(sparkleCell, vec2(12.9898, 78.233))) * 43758.5453);
+            float sparkleMask = smoothstep(0.78, 1.0, sparkleNoise);
+            sparkle *= sparkleMask;
+            vec3 specColor = uSunColor * uSunIntensity * (sunSpec * 1.2 + sparkle * 1.8);
             // Ambient and base color
             vec3 ambient = vec3(0.08, 0.13, 0.22);
             vec3 base = mix(uWaterColor, ambient, 0.4);
             base = mix(base, vec3(0.18, 0.32, 0.48), fresnel);
-            base += uSunColor * uSunIntensity * sunSpec * 1.2;
             base = max(base, ambient * 0.7); // Prevent black
 
             // Foam: based on wave slope (normal Y) and fresnel
@@ -109,13 +135,21 @@ unsigned int createWaterProgram() {
             vec3 foamColor = mix(vec3(0.85, 0.95, 1.0), base, 0.5);
             base = mix(base, foamColor, clamp(foam, 0.0, 1.0));
 
-            float alpha = uOpacity;
+            // Alpha: combine opacity setting with edge fade so grazing-angle
+            // views go transparent rather than producing a solid blue band.
+            float alpha = uOpacity * edgeFade;
             // Fog
             float fogSpan = max(uFogFar - uFogNear, 0.001);
             float fogT = clamp((distance(vWorldPos, uCameraPos) - uFogNear) / fogSpan, 0.0, 1.0);
             float fogAmount = pow(fogT, 1.25) * clamp(uFogStrength, 0.0, 1.0);
             base = mix(base, uFogColor, fogAmount);
-            FragColor = vec4(base, alpha);
+            if (uReflectionOnly != 0) {
+                // Reflection-only additive pass.
+                FragColor = vec4(specColor * uReflectionStrength, 1.0);
+            } else {
+                // Base-water pass only (premultiplied alpha).
+                FragColor = vec4(base * alpha, alpha);
+            }
         }
     )";
 
