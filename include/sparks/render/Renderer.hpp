@@ -1,8 +1,7 @@
-#include <string>
 #pragma once
 
-
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <glm/vec2.hpp>
@@ -15,6 +14,7 @@
 #include "sparks/render/WaterChunkCuller.hpp"
 #include "sparks/render/TerrainChunkCuller.hpp"
 #include "sparks/render/SkydomeChunkCuller.hpp"
+#include "sparks/render/RenderContext.hpp"
 
 namespace sparks::render {
 
@@ -224,9 +224,21 @@ public:
 private:
     void createGridResources();
     void createEnvironmentResources();
+    void createSkydomeResources();
+    void createCloudResources();
+    void createTerrainResources();
+    void createWaterResources();
     void createFramebuffer();
     void destroyFramebuffer();
     void rebuildFramebufferIfNeeded(int width, int height);
+
+    void renderSkydome(const RenderContext& ctx, unsigned int gpuQuery);
+    void renderTerrain(const RenderContext& ctx, unsigned int gpuQuery);
+    void renderWater(const RenderContext& ctx, unsigned int gpuQuery);
+    void renderImportedModel(const RenderContext& ctx, unsigned int gpuQuery);
+    void renderWeather(const RenderContext& ctx, unsigned int gpuQuery);
+    void renderGrid(const RenderContext& ctx);
+    void renderPostProcess(const RenderContext& ctx);
 
     unsigned int m_shaderProgram{0};
     unsigned int m_gridVao{0};
@@ -244,6 +256,11 @@ private:
     bool m_hasSkydomeTexture{false};
     SkydomeChunkCuller m_skydomeChunkCuller;
     int m_lastSkydomeVisibleVertices{0};
+    // Half-resolution FBO used to render the skydome at 50% size then blit up.
+    // The sky has no hard edges so bilinear upscaling is visually transparent
+    // while roughly quartering the fragment shader invocation count.
+    unsigned int m_skyHalfFbo{0};
+    unsigned int m_skyHalfColorTex{0};
 
     unsigned int m_terrainProgram{0};
     unsigned int m_terrainVao{0};

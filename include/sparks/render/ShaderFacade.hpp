@@ -6,6 +6,7 @@
 #include "shaders/water/WaterProgram.hpp"
 #include "shaders/cloud/CloudProgram.hpp"
 #include "shaders/underwater/UnderwaterProgram.hpp"
+#include "shaders/object/ObjectProgram.hpp"
 
 namespace sparks::render {
 
@@ -17,6 +18,7 @@ public:
     static unsigned int CreateWaterProgram();
     static unsigned int CreateCloudProgram();
     static unsigned int CreateUnderwaterProgram();
+    static unsigned int CreateObjectProgram();
 };
 
 } // namespace sparks::render

@@ -66,11 +66,12 @@ unsigned int createSkydomeProgram() {
             return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
         }
 
-        float fbm4Sky(vec2 p) {
+        // 2-octave FBM — sufficient for sky clouds, half the cost of 4 octaves
+        float fbm2Sky(vec2 p) {
             float v = 0.0;
             float a = 0.55;
             mat2 rot = mat2(0.80, -0.60, 0.60, 0.80);
-            for (int i = 0; i < 4; ++i) { // reduced octaves for performance
+            for (int i = 0; i < 2; ++i) {
                 v += a * noise2Sky(p);
                 p = rot * p * 2.02 + vec2(1.37, -0.91);
                 a *= 0.5;
@@ -79,28 +80,16 @@ unsigned int createSkydomeProgram() {
         }
 
         // Ultra-fast hash-based procedural starfield (no loop)
-        float starFieldHash(vec3 dir, out float haloOut, out vec3 starColor) {
-            // Project direction to spherical coordinates
-            float phi = atan(dir.z, dir.x);
-            float theta = acos(clamp(dir.y, -1.0, 1.0));
-            // Map to [0,1]
-            vec2 uv = vec2(phi / (2.0 * 3.14159265) + 0.5, theta / 3.14159265);
-            // Scale up for more randomness
-            uv *= 512.0;
-            float h = hash21(uv);
-            // Color variation per star
-            float colorSeed = hash21(uv + 17.0);
-            starColor = mix(vec3(1.0, 0.95, 0.95), vec3(0.7, 0.85, 1.0), colorSeed); // white to blue
-            // Patch: Render star as a soft disc (like sun), using angular distance from star center
-            // Optimized: hash-based, no loop, disc-shaped stars
-            // Tile-based: divide sky into grid, place one star per tile
+        float starFieldHash(vec3 dir, float viewTheta, float viewPhi, out float haloOut, out vec3 starColor) {
+            // Early-out: stars only in upper hemisphere — skip all trig for lower half
+            if (viewTheta > 1.5707963) {
+                haloOut = 0.0;
+                starColor = vec3(1.0);
+                return 0.0;
+            }
+            if (viewPhi < 0.0) viewPhi += 6.2831853;
             float core = 0.0;
             float halo = 0.0;
-            // Convert direction to spherical coordinates
-            float viewTheta = acos(clamp(dir.y, -1.0, 1.0)); // [0, pi]
-            float viewPhi = atan(dir.z, dir.x); // [-pi, pi]
-            if (viewPhi < 0.0) viewPhi += 6.2831853;
-            // Grid size (tune for ~100 stars)
             const float TILE_U = 1.0 / 16.0; // 16 tiles horizontally
             const float TILE_V = 1.0 / 12.0; // 12 tiles vertically
             float u = viewPhi / 6.2831853;
@@ -133,12 +122,6 @@ unsigned int createSkydomeProgram() {
             float twinklePhase = hash21(tile + 5.7) * 6.2831853; // [0, 2pi]
             float twinkleAmp = mix(0.5, 1.0, shineRand); // random twinkle amplitude
             float twinkle = 0.7 + twinkleAmp * sin(t * 0.2 + twinklePhase); // much slower twinkle
-            // Only render stars in upper dome
-            if (viewTheta > 1.5707963) {
-                haloOut = 0.0;
-                starColor = vec3(1.0);
-                return 0.0;
-            }
             // Color variation per tile
             float c1 = hash21(tile + 1.3);
             float c2 = hash21(tile + 2.7);
@@ -148,10 +131,9 @@ unsigned int createSkydomeProgram() {
                 float coreStrength = mix(1.0, 2.0, shineRand); // much lower core for bloom
                 float haloStrength = mix(0.2, 0.5, shineRand); // much lower halo
 
-            // --- 4-point star glare ---
-            // Spherical coordinates for pixel and star
-            float glareTheta = acos(clamp(dir.y, -1.0, 1.0));
-            float glarePhi = atan(dir.z, dir.x);
+            // --- 4-point star glare --- reuse passed-in spherical coords
+            float glareTheta = viewTheta;
+            float glarePhi = viewPhi < 0.0 ? viewPhi + 6.2831853 : viewPhi;
             if (glarePhi < 0.0) glarePhi += 6.2831853;
             float starThetaG = acos(clamp(starDir.y, -1.0, 1.0));
             float starPhiG = atan(starDir.z, starDir.x);
@@ -215,16 +197,20 @@ unsigned int createSkydomeProgram() {
             vec2 zenithUV = skyDir.xz / safeY;
             vec2 horizonUV = normalize(skyDir.xz) * (1.0 - abs(skyDir.y));
             vec2 cloudUV = mix(horizonUV, zenithUV, blend);
+            // Clouds: skip expensive FBM when cloud amount is zero
+            float cumAlpha = 0.0;
+            if (uCloudAmount > 0.01) {
             float cloudSc = 0.038 * uCloudScale;
             vec2 uv0 = cloudUV * cloudSc;
             float timeShift = uTime * uCloudSpeed;
-            float fbm1 = fbm4Sky(uv0 + vec2(timeShift, 0.0));
-            float fbm2 = fbm4Sky(uv0 * 2.3 + vec2(timeShift * 0.5, 0.0));
-            float fbm3 = fbm4Sky(uv0 * 4.1 + vec2(timeShift * 0.2, 0.0));
+            float fbm1 = fbm2Sky(uv0 + vec2(timeShift, 0.0));
+            float fbm2 = fbm2Sky(uv0 * 2.3 + vec2(timeShift * 0.5, 0.0));
+            float fbm3 = fbm2Sky(uv0 * 4.1 + vec2(timeShift * 0.2, 0.0));
             float cloudShape = (fbm1 * 0.50 + fbm2 * 0.32 + fbm3 * 0.18); // rebalanced for 3 layers
             float cloudCoverage = 0.44 + 0.18 * (1.0 - clamp(uCloudAmount, 0.0, 1.5));
             // Softer, rounder edge for fluffy look
-            float cumAlpha = pow(smoothstep(cloudCoverage, cloudCoverage + 0.10, cloudShape), 1.08);
+            cumAlpha = pow(smoothstep(cloudCoverage, cloudCoverage + 0.10, cloudShape), 1.08);
+            } // end cloud FBM block
             float shadowStrength = clamp(uCloudShadowStrength, 0.0, 1.0);
             // Soft blue shadow, no gray
             vec3 shadowBase = mix(color, uZenithColor, 0.35);
@@ -285,10 +271,16 @@ unsigned int createSkydomeProgram() {
 
             // Add exactly 100 procedural stars
             float halo = 0.0;
-                vec3 starColor = vec3(1.0);
-                float star = starFieldHash(skyDir, halo, starColor);
-                // Add star and halo using max() so they are never dimmed by the background
-                vec3 starGlow = max(star * starColor * 2.5, halo * starColor * 2.8);
+            vec3 starColor = vec3(1.0);
+            // Pre-compute spherical coords once for both stars and (if needed) glare
+            float viewTheta = acos(clamp(skyDir.y, -1.0, 1.0));
+            float viewPhi   = atan(skyDir.z, skyDir.x);
+            // Early-out: skip all star trig in lower hemisphere
+            float star = 0.0;
+            if (viewTheta <= 1.5707963)
+                star = starFieldHash(skyDir, viewTheta, viewPhi, halo, starColor);
+            // Add star and halo using max() so they are never dimmed by the background
+            vec3 starGlow = max(star * starColor * 2.5, halo * starColor * 2.8);
             color = max(color, starGlow);
 
             FragColor = vec4(color, 1.0);

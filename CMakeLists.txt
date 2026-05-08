@@ -130,6 +130,10 @@ add_executable(SparksEngine
   src/render/CloudShadowMap.cpp
   src/render/terrain/TerrainUtils.cpp
   src/render/GLUtils.cpp
+  src/render/RendererRender.cpp
+  src/render/RendererResources.cpp
+  src/render/RendererFramebuffer.cpp
+  src/render/shaders/object/ObjectProgram.cpp
   src/ui/PropertyPanel.cpp
 )
 
