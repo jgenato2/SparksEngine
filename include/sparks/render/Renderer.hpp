@@ -12,6 +12,9 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "sparks/render/WeatherRenderer.hpp"
+#include "sparks/render/WaterChunkCuller.hpp"
+#include "sparks/render/TerrainChunkCuller.hpp"
+#include "sparks/render/SkydomeChunkCuller.hpp"
 
 namespace sparks::render {
 
@@ -124,7 +127,7 @@ struct EnvironmentSettings {
     bool enableSun{true};
     float sunDiscSize{1.0f};
     float sunIntensity{1.0f};
-    float waterSunStrength{1.6f};
+    float waterSunStrength{2.4f};
     float objectSunGlowStrength{0.36f};
     glm::vec3 sunColor{1.00f, 0.90f, 0.70f};
     float sunHeatStrength{0.35f};
@@ -157,8 +160,10 @@ struct EnvironmentSettings {
 
     bool enableWater{false};
     float waterLevel{0.0f};
+    float waterHalfExtent{220.0f};
     glm::vec3 waterColor{0.10f, 0.36f, 0.54f};
     float waterOpacity{0.42f};
+    float waterReflectionStrength{1.0f};
     float waveAmplitude{0.18f};
     float waveFrequency{2.0f};
     float waterFoamIntensity{1.0f};
@@ -207,6 +212,9 @@ public:
     void render(const ViewControls& viewControls);
 
     unsigned int viewportTexture() const { return m_usePostProcessed ? m_postColorTexture : m_colorTexture; }
+    int lastWaterVisibleVertices() const { return m_lastWaterVisibleVertices; }
+    int lastTerrainVisibleVertices() const { return m_lastTerrainVisibleVertices; }
+    int lastSkydomeVisibleVertices() const { return m_lastSkydomeVisibleVertices; }
 
     // --- Cloud shadow mapping resources ---
     void loadCloudShadowMapShader();
@@ -234,6 +242,8 @@ private:
     unsigned int m_skydomeTexture{0};
     int m_skydomeIndexCount{0};
     bool m_hasSkydomeTexture{false};
+    SkydomeChunkCuller m_skydomeChunkCuller;
+    int m_lastSkydomeVisibleVertices{0};
 
     unsigned int m_terrainProgram{0};
     unsigned int m_terrainVao{0};
@@ -242,12 +252,16 @@ private:
     unsigned int m_terrainTexture{0};
     int m_terrainIndexCount{0};
     bool m_hasTerrainTexture{false};
+    TerrainChunkCuller m_terrainChunkCuller;
+    int m_lastTerrainVisibleVertices{0};
 
     unsigned int m_waterProgram{0};
     unsigned int m_waterVao{0};
     unsigned int m_waterVbo{0};
     unsigned int m_waterEbo{0};
     int m_waterIndexCount{0};
+    WaterChunkCuller m_waterChunkCuller;
+    int m_lastWaterVisibleVertices{0};
 
     unsigned int m_underwaterProgram{0};
     unsigned int m_fullscreenVao{0};

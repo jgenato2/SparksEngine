@@ -1,11 +1,10 @@
 #include <ctime>
 #include <cmath>
 #include <cstdio>
-
-
 #include <stdexcept>
 #include "sparks/render/terrain/DiamondSquareTerrain.hpp"
 #include "sparks/render/Renderer.hpp"
+#include "sparks/render/RendererAstronomy.hpp"
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <glm/common.hpp>
@@ -14,90 +13,8 @@
 #include <glm/gtc/type_ptr.hpp>
 #include "sparks/render/CloudShadowMap.hpp"
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-namespace sparks::render {
-
-
-// Struct to hold precomputed star data (must match header)
-#include "sparks/render/Renderer.hpp" // Ensure StarData is declared before use
-
-// Utility: hash function for deterministic randomness (matches shader)
-static float hash21(float x, float y) {
-    glm::vec2 p = glm::fract(glm::vec2(x, y) * glm::vec2(127.1f, 311.7f));
-    return glm::fract(p.x * p.y);
-}
-
-// Generate star list (tile-based, matches shader logic)
-std::vector<StarData> generateStarList(int tileU = 16, int tileV = 12) {
-    std::vector<StarData> stars;
-    const float tileUf = static_cast<float>(tileU);
-    const float tileVf = static_cast<float>(tileV);
-    for (int y = 0; y < tileV; ++y) {
-        for (int x = 0; x < tileU; ++x) {
-            const float xf = static_cast<float>(x);
-            const float yf = static_cast<float>(y);
-            // Avoid seam: skip tiles near u=0 or u=1
-            float u = (xf + 0.5f) / tileUf;
-            if (u < 0.04f || u > 0.96f) continue;
-            // Hash to get star position within tile, avoid edge
-            float starU = (hash21(xf + 0.1f, yf) * 0.6f + 0.2f) / tileUf + xf / tileUf;
-            float starV = (hash21(xf + 0.7f, yf) * 0.6f + 0.2f) / tileVf + yf / tileVf;
-            float phi = starU * 2.0f * float(M_PI);
-            float theta = starV * float(M_PI);
-            glm::vec3 dir = glm::vec3(
-                std::cos(phi) * std::sin(theta),
-                std::cos(theta),
-                std::sin(phi) * std::sin(theta)
-            );
-            // Color variation per star
-            float colorSeed = hash21(xf + 17.0f, yf);
-            glm::vec3 color = glm::mix(glm::vec3(1.0f, 0.95f, 0.95f), glm::vec3(0.7f, 0.85f, 1.0f), colorSeed);
-            // Twinkle
-            float twinklePhase = hash21(xf + 5.7f, yf) * 2.0f * float(M_PI);
-            float shineRand = hash21(xf + 9.7f, yf);
-            float twinkleAmp = glm::mix(0.5f, 1.0f, shineRand);
-            // Size
-            float sizeRand = hash21(xf + 8.3f, yf);
-            float radius = glm::mix(0.00004f, 0.00010f, sizeRand);
-            stars.push_back(StarData{dir, color, twinklePhase, twinkleAmp, radius});
-        }
-    }
-    return stars;
-}
-
-// Simple sun position calculation (not as accurate as SPA/NOAA, but sufficient for visual realism)
-// Returns sun direction in world space (Y up)
-glm::vec3 computeSunDirection(float latitude, float longitude, float utcTime, int dayOfYear) {
-    // Convert degrees to radians
-    const float latRad = glm::radians(latitude);
-    // Fractional year (in radians)
-    float gamma = 2.0f * static_cast<float>(M_PI) / 365.0f * (dayOfYear - 1 + (utcTime - 12.0f) / 24.0f);
-    // Equation of time and declination (approximate)
-    float eqTime = 229.18f * (0.000075f + 0.001868f * cos(gamma) - 0.032077f * sin(gamma)
-        - 0.014615f * cos(2.0f * gamma) - 0.040849f * sin(2.0f * gamma));
-    float decl = 0.006918f - 0.399912f * cos(gamma) + 0.070257f * sin(gamma)
-        - 0.006758f * cos(2.0f * gamma) + 0.000907f * sin(2.0f * gamma)
-        - 0.002697f * cos(3.0f * gamma) + 0.00148f * sin(3.0f * gamma);
-    // Time offset
-    float timeOffset = eqTime + 4.0f * longitude - 60.0f * 0.0f; // 0.0 = timezone offset
-    // True solar time (in minutes)
-    float tst = utcTime * 60.0f + timeOffset;
-    // Hour angle
-    float ha = (tst / 4.0f) - 180.0f;
-    float haRad = glm::radians(ha);
-    // Solar elevation
-    float elevation = asinf(sinf(latRad) * sinf(decl) + cosf(latRad) * cosf(decl) * cosf(haRad));
-    // Solar azimuth
-    float azimuth = atan2f(-sinf(haRad), cosf(latRad) * tanf(decl) - sinf(latRad) * cosf(haRad));
-    // Convert to direction vector (Y up)
-    float y = sinf(elevation);
-    float x = cosf(elevation) * sinf(azimuth);
-    float z = cosf(elevation) * cosf(azimuth);
-    return glm::normalize(glm::vec3(x, y, z));
-}
+namespace sparks::render
+{
 
     void Renderer::initializeCloudShadowMap(int size)
     {
@@ -156,6 +73,7 @@ glm::vec3 computeSunDirection(float latitude, float longitude, float utcTime, in
 #include <stb_image.h>
 
 constexpr float kCameraFarPlane = 1000.0f;
+constexpr float kWaterHalfExtent = 220.0f;
 
 #include "sparks/render/GLUtils.hpp"
 #include "sparks/render/ShaderFacade.hpp"
@@ -405,7 +323,7 @@ unsigned int createCloudProgram()
 // Renders a fullscreen triangle (gl_VertexID trick, no VBO) and applies:
 //   wave-distorted UV sampling, chromatic aberration, animated FBM caustics,
 //   depth-based colour tint/fog, and a vignette.
-unsigned int createUnderwaterProgram()
+unsigned int createUnderwaterPostProcessProgram()
 {
     static constexpr const char *kVertexShader = R"(
         #version 460 core
@@ -465,8 +383,9 @@ unsigned int createUnderwaterProgram()
         }
 
         void main() {
-            float t     = uTime;
-            float depth = max(uDepth, 0.0);
+            float t = uTime;
+            float rawDepth = max(uDepth, 0.0);
+            float depth = max(rawDepth - 0.30, 0.0);
 
             vec3 scene = texture(uSceneTex, vUv).rgb;
             vec3 outColor = scene;
@@ -475,7 +394,7 @@ unsigned int createUnderwaterProgram()
 
             // ── Wave distortion of the scene (refraction effect) ──────────────
             // Strength scales softly from zero to a maximum of 0.014 as depth grows
-            float distStr = clamp(depth * 0.025, 0.0, 0.0045);
+            float distStr = clamp(depth * 0.045, 0.0, 0.0100);
             vec2 distort;
             distort.x = sin(vUv.y * 4.5 + t * 0.55) * sin(vUv.x * 3.0 + t * 0.32);
             distort.y = cos(vUv.x * 4.0 + t * 0.48) * cos(vUv.y * 3.2 + t * 0.40);
@@ -500,16 +419,16 @@ unsigned int createUnderwaterProgram()
                           * causticStr * 0.30;
 
             // ── Colour tint – deeper water is colder and darker ───────────────
-            float tintAmt = clamp(depth * 0.24, 0.0, 0.82);
-            vec3 deepColor = vec3(0.01, 0.07, 0.34);
+            float tintAmt = clamp(depth * 0.30, 0.0, 0.82);
+            vec3 deepColor = vec3(0.01, 0.06, 0.26);
             // Near surface is nudged slightly toward cyan-blue, then transitions
             // to a deeper ocean blue as depth increases.
-            vec3 nearBlue = mix(uWaterTint, vec3(0.08, 0.50, 0.74), 0.42);
-            vec3 tint = mix(nearBlue, deepColor, clamp(depth * 0.075, 0.0, 1.0));
+            vec3 nearBlue = mix(uWaterTint, vec3(0.06, 0.44, 0.68), 0.50);
+            vec3 tint = mix(nearBlue, deepColor, clamp(depth * 0.12, 0.0, 1.0));
             vec3 tinted = mix(scene, tint, tintAmt);
 
             // Add caustic shimmer
-            tinted += vec3(0.17, 0.38, 0.56) * caustic;
+            tinted += vec3(0.14, 0.34, 0.52) * caustic;
 
             // Directional underwater god rays from the visible sun in screen space.
             vec2 sunToScene = vec2(0.5, 0.10) - uSunUv;
@@ -519,7 +438,7 @@ unsigned int createUnderwaterProgram()
             float godRays = (rayA * 0.72 + rayB * 0.46)
                           * clamp(1.0 - depth * 0.22, 0.0, 1.0)
                           * uSunVisible;
-            tinted += vec3(0.16, 0.38, 0.62) * godRays;
+            tinted += vec3(0.14, 0.34, 0.58) * godRays;
 
             // ── Vignette ─────────────────────────────────────────────────────
             vec2 vigUv = vUv * 2.0 - 1.0;
@@ -528,11 +447,11 @@ unsigned int createUnderwaterProgram()
             tinted *= vign;
 
             // ── Depth fog – exponential darkening/murk as camera goes deeper ─
-            float fog = exp(-depth * 0.11);
+            float fog = exp(-depth * 0.22);
             tinted = mix(tint * 0.10, tinted, fog);
 
             // ── Near-surface brightness flicker when barely submerged ─────────
-            float surfaceGlow = smoothstep(1.0, 0.0, depth) * 0.10
+            float surfaceGlow = smoothstep(0.7, 0.0, depth) * 0.06
                               * (0.85 + 0.15 * sin(t * 3.1 + vUv.x * 6.0));
             tinted += vec3(0.42, 0.68, 0.92) * surfaceGlow;
 
@@ -752,12 +671,14 @@ namespace sparks::render
         m_terrainProgram = ShaderFacade::CreateTerrainProgram();
         m_waterProgram = ShaderFacade::CreateWaterProgram();
         m_cloudProgram = ShaderFacade::CreateCloudProgram();
-        m_underwaterProgram = ShaderFacade::CreateUnderwaterProgram();
+        m_underwaterProgram = createUnderwaterPostProcessProgram();
 
         // Only disable cloud objects, allow procedural cloud formation
         m_environmentSettings.enableCloudObjects = false;
-        if (!m_environmentSettings.cloudObjects.empty()) {
-            for (auto& cloud : m_environmentSettings.cloudObjects) {
+        if (!m_environmentSettings.cloudObjects.empty())
+        {
+            for (auto &cloud : m_environmentSettings.cloudObjects)
+            {
                 cloud.enabled = false;
             }
         }
@@ -882,6 +803,7 @@ namespace sparks::render
         bool waterChanged =
             settings.enableWater != m_environmentSettings.enableWater ||
             settings.waterLevel != m_environmentSettings.waterLevel ||
+            settings.waterHalfExtent != m_environmentSettings.waterHalfExtent ||
             settings.waterColor != m_environmentSettings.waterColor ||
             settings.waterOpacity != m_environmentSettings.waterOpacity ||
             settings.waveAmplitude != m_environmentSettings.waveAmplitude ||
@@ -891,8 +813,10 @@ namespace sparks::render
         m_environmentSettings = settings;
         // Only disable cloud objects, allow procedural cloud formation
         m_environmentSettings.enableCloudObjects = false;
-        if (!m_environmentSettings.cloudObjects.empty()) {
-            for (auto& cloud : m_environmentSettings.cloudObjects) {
+        if (!m_environmentSettings.cloudObjects.empty())
+        {
+            for (auto &cloud : m_environmentSettings.cloudObjects)
+            {
                 cloud.enabled = false;
             }
         }
@@ -902,6 +826,7 @@ namespace sparks::render
         m_environmentSettings.sunDiscSize = glm::clamp(m_environmentSettings.sunDiscSize, 0.2f, 8.0f);
         m_environmentSettings.sunIntensity = glm::clamp(m_environmentSettings.sunIntensity, 0.0f, 4.0f);
         m_environmentSettings.waterSunStrength = glm::clamp(m_environmentSettings.waterSunStrength, 0.0f, 6.0f);
+        m_environmentSettings.waterReflectionStrength = glm::clamp(m_environmentSettings.waterReflectionStrength, 0.0f, 3.0f);
         m_environmentSettings.sunHeatStrength = glm::clamp(m_environmentSettings.sunHeatStrength, 0.0f, 3.0f);
         m_environmentSettings.dustAmount = glm::clamp(m_environmentSettings.dustAmount, 0.0f, 1.5f);
         m_environmentSettings.sunRayStrength = glm::clamp(m_environmentSettings.sunRayStrength, 0.0f, 2.5f);
@@ -911,36 +836,52 @@ namespace sparks::render
         m_environmentSettings.fogNear = glm::clamp(m_environmentSettings.fogNear, 1.0f, 500.0f);
         float fogFarMin = m_environmentSettings.fogNear + 1.0f;
         float fogFarMax = 900.0f;
-        if (fogFarMin > fogFarMax) {
+        if (fogFarMin > fogFarMax)
+        {
             m_environmentSettings.fogFar = fogFarMin;
-        } else {
+        }
+        else
+        {
             m_environmentSettings.fogFar = glm::clamp(m_environmentSettings.fogFar, fogFarMin, fogFarMax);
         }
         m_environmentSettings.fogStrength = glm::clamp(m_environmentSettings.fogStrength, 0.0f, 1.0f);
+        m_environmentSettings.waterHalfExtent = glm::clamp(m_environmentSettings.waterHalfExtent, 20.0f, 4000.0f);
 
         // Clamp terrain
         float terrainSizeMin = 20.0f, terrainSizeMax = 4000.0f;
-        if (terrainSizeMin > terrainSizeMax) {
+        if (terrainSizeMin > terrainSizeMax)
+        {
             m_environmentSettings.terrainSize = terrainSizeMin;
-        } else {
+        }
+        else
+        {
             m_environmentSettings.terrainSize = glm::clamp(m_environmentSettings.terrainSize, terrainSizeMin, terrainSizeMax);
         }
         float terrainHeightMin = -20.0f, terrainHeightMax = 20.0f;
-        if (terrainHeightMin > terrainHeightMax) {
+        if (terrainHeightMin > terrainHeightMax)
+        {
             m_environmentSettings.terrainHeight = terrainHeightMin;
-        } else {
+        }
+        else
+        {
             m_environmentSettings.terrainHeight = glm::clamp(m_environmentSettings.terrainHeight, terrainHeightMin, terrainHeightMax);
         }
         float terrainPatchScaleMin = 0.01f, terrainPatchScaleMax = 4.0f;
-        if (terrainPatchScaleMin > terrainPatchScaleMax) {
+        if (terrainPatchScaleMin > terrainPatchScaleMax)
+        {
             m_environmentSettings.terrainPatchScale = terrainPatchScaleMin;
-        } else {
+        }
+        else
+        {
             m_environmentSettings.terrainPatchScale = glm::clamp(m_environmentSettings.terrainPatchScale, terrainPatchScaleMin, terrainPatchScaleMax);
         }
         float terrainRoughnessMin = 0.0f, terrainRoughnessMax = 3.0f;
-        if (terrainRoughnessMin > terrainRoughnessMax) {
+        if (terrainRoughnessMin > terrainRoughnessMax)
+        {
             m_environmentSettings.terrainRoughness = terrainRoughnessMin;
-        } else {
+        }
+        else
+        {
             m_environmentSettings.terrainRoughness = glm::clamp(m_environmentSettings.terrainRoughness, terrainRoughnessMin, terrainRoughnessMax);
         }
         for (auto &cloud : m_environmentSettings.cloudObjects)
@@ -963,7 +904,8 @@ namespace sparks::render
         {
             m_environmentSettings.terrainLightDirection = glm::vec3(0.30f, 0.72f, -0.46f);
         }
-        if (terrainChanged || waterChanged) {
+        if (terrainChanged || waterChanged)
+        {
             createEnvironmentResources();
         }
     }
@@ -1047,7 +989,8 @@ namespace sparks::render
 #endif
         int dayOfYear = tm_now.tm_yday + 1;
         // Use environment settings for sun position
-        if (m_environmentSettings.latitude != 0.0 || m_environmentSettings.longitude != 0.0) {
+        if (m_environmentSettings.latitude != 0.0 || m_environmentSettings.longitude != 0.0)
+        {
             glm::vec3 sunDir = computeSunDirection(
                 m_environmentSettings.latitude,
                 m_environmentSettings.longitude,
@@ -1113,13 +1056,23 @@ namespace sparks::render
         world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
         world = glm::rotate(world, glm::radians(viewControls.worldRotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
         world = glm::translate(world, -cameraTarget);
+        const glm::mat4 inverseWorld = glm::inverse(world);
+        // Rotation-only part of the world matrix (no translation).
+        // Used to rotate the light direction into the same space as vertex normals
+        // so that lighting/specular stays fixed relative to the scene regardless of
+        // how the camera orbit angle changes.
+        glm::mat4 worldRotMat(1.0f);
+        worldRotMat = glm::rotate(worldRotMat, glm::radians(viewControls.worldRotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
+        worldRotMat = glm::rotate(worldRotMat, glm::radians(viewControls.worldRotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
+        const glm::mat3 worldRot3x3 = glm::mat3(worldRotMat);
+        // Light direction in the rotated world space (same space as vWorldNormal).
+        const glm::vec3 rotatedLightDir = glm::normalize(worldRot3x3 * m_environmentSettings.terrainLightDirection);
+        // Camera position expressed in the same rotated world space as vWorldPos so
+        // that viewDir = normalize(uCameraPos - vWorldPos) is computed correctly.
+        const glm::vec3 rotatedCameraPos = glm::vec3(world * glm::vec4(cameraPos, 1.0f));
+
         if (m_environmentSettings.enableSkydome && m_skydomeProgram != 0 && m_skydomeVao != 0 && m_skydomeIndexCount > 0)
         {
-            // Compute world rotation matrix (no translation, only world rotation)
-            glm::mat4 worldRotMat(1.0f);
-            worldRotMat = glm::rotate(worldRotMat, glm::radians(viewControls.worldRotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
-            worldRotMat = glm::rotate(worldRotMat, glm::radians(viewControls.worldRotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
-            glm::mat3 worldRot3x3 = glm::mat3(worldRotMat);
             const int skyWorldRotLoc = glGetUniformLocation(m_skydomeProgram, "uWorldRot");
             glUniformMatrix3fv(skyWorldRotLoc, 1, GL_FALSE, glm::value_ptr(worldRot3x3));
             glUseProgram(m_skydomeProgram);
@@ -1133,7 +1086,6 @@ namespace sparks::render
             skydomeWorld = glm::rotate(skydomeWorld, glm::radians(viewControls.worldRotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f));
             const glm::mat4 skyMvp = projection * viewRotOnly * skydomeWorld * skydomeModel;
 
-
             const int skyMvpLoc = glGetUniformLocation(m_skydomeProgram, "uMvp");
             const int skyHorizonLoc = glGetUniformLocation(m_skydomeProgram, "uHorizonColor");
             const int skyZenithLoc = glGetUniformLocation(m_skydomeProgram, "uZenithColor");
@@ -1143,6 +1095,8 @@ namespace sparks::render
             const int skySunColorLoc = glGetUniformLocation(m_skydomeProgram, "uSunColor");
             const int skySunHaloSizeLoc = glGetUniformLocation(m_skydomeProgram, "uSunHaloSize");
             const int skySunHaloStrengthLoc = glGetUniformLocation(m_skydomeProgram, "uSunHaloStrength");
+            const int skyDustAmountLoc = glGetUniformLocation(m_skydomeProgram, "uDustAmount");
+            const int skyDustColorLoc = glGetUniformLocation(m_skydomeProgram, "uDustColor");
             const int skyCloudAmountLoc = glGetUniformLocation(m_skydomeProgram, "uCloudAmount");
             const int skyCloudScaleLoc = glGetUniformLocation(m_skydomeProgram, "uCloudScale");
             const int skyCloudSpeedLoc = glGetUniformLocation(m_skydomeProgram, "uCloudSpeed");
@@ -1180,6 +1134,8 @@ namespace sparks::render
             glUniform3f(skySunColorLoc, sunColor.r, sunColor.g, sunColor.b);
             glUniform1f(skySunHaloSizeLoc, sunHaloSize);
             glUniform1f(skySunHaloStrengthLoc, sunHaloStrength);
+            glUniform1f(skyDustAmountLoc, m_environmentSettings.dustAmount);
+            glUniform3f(skyDustColorLoc, m_environmentSettings.dustColor.r, m_environmentSettings.dustColor.g, m_environmentSettings.dustColor.b);
             glUniform1f(skyCloudAmountLoc, m_environmentSettings.skyCloudAmount);
             glUniform1f(skyCloudScaleLoc, m_environmentSettings.skyCloudScale);
             glUniform1f(skyCloudSpeedLoc, m_environmentSettings.skyCloudSpeed);
@@ -1194,13 +1150,22 @@ namespace sparks::render
             glUniform1f(skyStarDensityLoc, m_environmentSettings.starDensity);
 
             if (m_hasSkydomeTexture)
-            // Patch: Ignore skydome texture to ensure procedural stars are visible
-            // (Do not bind skydome texture, always use procedural shader)
+                // Patch: Ignore skydome texture to ensure procedural stars are visible
+                // (Do not bind skydome texture, always use procedural shader)
 
-            glBeginQuery(GL_TIME_ELAPSED, gpuQueries[static_cast<int>(GpuProfileSlot::Skydome)]);
+                glBeginQuery(GL_TIME_ELAPSED, gpuQueries[static_cast<int>(GpuProfileSlot::Skydome)]);
             glDepthMask(GL_FALSE);
-            glBindVertexArray(m_skydomeVao);
-            glDrawElements(GL_TRIANGLES, m_skydomeIndexCount, GL_UNSIGNED_INT, nullptr);
+            {
+                const Frustum skyFrustum = extractFrustum(skyMvp);
+                // Occlusion culling is disabled for the skydome: you are always inside
+                // the dome looking outward, so 1-frame latency queries produce square
+                // hole artifacts when the camera rotates. Frustum culling is sufficient.
+                const int visibleChunks = m_skydomeChunkCuller.drawVisible(skyFrustum, GL_TRIANGLES, false);
+                m_lastSkydomeVisibleVertices = visibleChunks
+                    * SkydomeChunkCuller::kQuadsPerChunkLat
+                    * SkydomeChunkCuller::kQuadsPerChunkLon
+                    * 4;
+            }
             glDepthMask(GL_TRUE);
             glEndQuery(GL_TIME_ELAPSED);
         }
@@ -1235,10 +1200,10 @@ namespace sparks::render
             glUniform3f(terrainBaseBLoc, m_environmentSettings.terrainColorB.r, m_environmentSettings.terrainColorB.g, m_environmentSettings.terrainColorB.b);
             glUniform1f(terrainPatchScaleLoc, m_environmentSettings.terrainPatchScale);
             glUniform1f(terrainRoughnessLoc, m_environmentSettings.terrainRoughness);
-            glUniform3f(terrainLightDirLoc, m_environmentSettings.terrainLightDirection.x, m_environmentSettings.terrainLightDirection.y, m_environmentSettings.terrainLightDirection.z);
+            glUniform3f(terrainLightDirLoc, rotatedLightDir.x, rotatedLightDir.y, rotatedLightDir.z);
             glUniform1i(terrainTexLoc, 1);
             glUniform1i(terrainUseTexLoc, m_hasTerrainTexture ? 1 : 0);
-            glUniform3f(terrainCameraPosLoc, cameraPos.x, cameraPos.y, cameraPos.z);
+            glUniform3f(terrainCameraPosLoc, rotatedCameraPos.x, rotatedCameraPos.y, rotatedCameraPos.z);
             glUniform3f(terrainFogColorLoc, m_environmentSettings.fogColor.r, m_environmentSettings.fogColor.g, m_environmentSettings.fogColor.b);
             glUniform1f(terrainFogNearLoc, m_environmentSettings.fogNear);
             glUniform1f(terrainFogFarLoc, m_environmentSettings.fogFar);
@@ -1254,7 +1219,9 @@ namespace sparks::render
             const int terrainSunGlowStrengthLoc = glGetUniformLocation(m_terrainProgram, "uSunGlowStrength");
             const int terrainWaterEnabledLoc = glGetUniformLocation(m_terrainProgram, "uWaterEnabled");
             const int terrainWaterLevelLoc = glGetUniformLocation(m_terrainProgram, "uWaterLevel");
+            const int terrainWaterHalfExtentLoc = glGetUniformLocation(m_terrainProgram, "uWaterHalfExtent");
             const int terrainWaterTintLoc = glGetUniformLocation(m_terrainProgram, "uWaterTint");
+            const int terrainInvWorldLoc = glGetUniformLocation(m_terrainProgram, "uInvWorld");
             glUniform4f(terrainDiffuseColorLoc, 1.0f, 1.0f, 1.0f, 1.0f); // White, fully opaque
             glUniform1f(terrainOpacityLoc, 1.0f);
             glUniform1f(terrainAlphaCutoffLoc, 0.01f);
@@ -1265,15 +1232,23 @@ namespace sparks::render
             glUniform1f(terrainSunGlowStrengthLoc, (m_environmentSettings.enableSun ? m_environmentSettings.sunIntensity : 0.0f) * 1.0f);
             glUniform1i(terrainWaterEnabledLoc, m_environmentSettings.enableWater ? 1 : 0);
             glUniform1f(terrainWaterLevelLoc, m_environmentSettings.waterLevel);
+            glUniform1f(terrainWaterHalfExtentLoc, m_environmentSettings.waterHalfExtent);
             glUniform3f(terrainWaterTintLoc, m_environmentSettings.waterColor.r, m_environmentSettings.waterColor.g, m_environmentSettings.waterColor.b);
+            glUniformMatrix4fv(terrainInvWorldLoc, 1, GL_FALSE, glm::value_ptr(inverseWorld));
 
             // Bind terrain texture to texture unit 1 before drawing terrain
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, m_terrainTexture);
 
             glBeginQuery(GL_TIME_ELAPSED, gpuQueries[static_cast<int>(GpuProfileSlot::Terrain)]);
-            glBindVertexArray(m_terrainVao);
-            glDrawElements(GL_TRIANGLES, m_terrainIndexCount, GL_UNSIGNED_INT, nullptr);
+            {
+                const Frustum terrainFrustum = extractFrustum(terrainMvp);
+                const int visibleChunks = m_terrainChunkCuller.drawVisible(terrainFrustum, GL_TRIANGLES, false);
+                m_lastTerrainVisibleVertices = visibleChunks
+                    * TerrainChunkCuller::kQuadsPerChunk
+                    * TerrainChunkCuller::kQuadsPerChunk
+                    * 4;
+            }
             glBindVertexArray(0);
             glEndQuery(GL_TIME_ELAPSED);
         }
@@ -1282,13 +1257,17 @@ namespace sparks::render
         if (m_environmentSettings.enableWater && m_waterProgram != 0 && m_waterVao != 0 && m_waterIndexCount > 0)
         {
             glUseProgram(m_waterProgram);
+            glEnable(GL_BLEND);
+            // Premultiplied alpha: specular highlights punch through water opacity.
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
             const int waterFoamIntensityLoc = glGetUniformLocation(m_waterProgram, "uFoamIntensity");
             glUniform1f(waterFoamIntensityLoc, m_environmentSettings.waterFoamIntensity);
 
             glm::mat4 waterModel(1.0f);
             waterModel = glm::translate(waterModel, glm::vec3(0.0f, m_environmentSettings.waterLevel, 0.0f));
-            constexpr float kDefaultWaterSize = 220.0f;
-            waterModel = glm::scale(waterModel, glm::vec3(kDefaultWaterSize / 220.0f, 1.0f, kDefaultWaterSize / 220.0f));
+            const float waterScale = m_environmentSettings.waterHalfExtent / kWaterHalfExtent;
+            waterModel = glm::scale(waterModel, glm::vec3(waterScale, 1.0f, waterScale));
             const glm::mat4 waterWorldModel = world * waterModel;
             const glm::mat4 waterMvp = projection * view * waterWorldModel;
 
@@ -1307,15 +1286,18 @@ namespace sparks::render
             const int waveAmplitudeLoc = glGetUniformLocation(m_waterProgram, "uWaveAmplitude");
             const int waveFrequencyLoc = glGetUniformLocation(m_waterProgram, "uWaveFrequency");
             const int waterTimeLoc = glGetUniformLocation(m_waterProgram, "uTime");
+            const int waterReflectionOnlyLoc = glGetUniformLocation(m_waterProgram, "uReflectionOnly");
+            const int waterReflectionStrengthLoc = glGetUniformLocation(m_waterProgram, "uReflectionStrength");
+            const int waterInvWorldRotLoc = glGetUniformLocation(m_waterProgram, "uInvWorldRot");
 
             glUniformMatrix4fv(waterMvpLoc, 1, GL_FALSE, glm::value_ptr(waterMvp));
             glUniformMatrix4fv(waterModelLoc, 1, GL_FALSE, glm::value_ptr(waterWorldModel));
             glUniform3f(waterColorLoc, m_environmentSettings.waterColor.r, m_environmentSettings.waterColor.g, m_environmentSettings.waterColor.b);
             glUniform1f(waterOpacityLoc, m_environmentSettings.waterOpacity);
             glUniform3f(waterSunColorLoc, m_environmentSettings.sunColor.r, m_environmentSettings.sunColor.g, m_environmentSettings.sunColor.b);
-            glUniform1f(waterSunIntensityLoc, m_environmentSettings.enableSun ? m_environmentSettings.sunIntensity : 0.0f);
-            glUniform3f(waterLightDirLoc, m_environmentSettings.terrainLightDirection.x, m_environmentSettings.terrainLightDirection.y, m_environmentSettings.terrainLightDirection.z);
-            glUniform3f(waterCameraPosLoc, cameraPos.x, cameraPos.y, cameraPos.z);
+            glUniform1f(waterSunIntensityLoc, m_environmentSettings.enableSun ? (m_environmentSettings.sunIntensity * m_environmentSettings.waterSunStrength) : 0.0f);
+            glUniform3f(waterLightDirLoc, rotatedLightDir.x, rotatedLightDir.y, rotatedLightDir.z);
+            glUniform3f(waterCameraPosLoc, rotatedCameraPos.x, rotatedCameraPos.y, rotatedCameraPos.z);
             glUniform3f(waterFogColorLoc, m_environmentSettings.fogColor.r, m_environmentSettings.fogColor.g, m_environmentSettings.fogColor.b);
             glUniform1f(waterFogNearLoc, m_environmentSettings.fogNear);
             glUniform1f(waterFogFarLoc, m_environmentSettings.fogFar);
@@ -1325,8 +1307,30 @@ namespace sparks::render
             glUniform1f(waterTimeLoc, elapsedSeconds);
 
             glBeginQuery(GL_TIME_ELAPSED, gpuQueries[static_cast<int>(GpuProfileSlot::Water)]);
-            glBindVertexArray(m_waterVao);
-            glDrawElements(GL_TRIANGLES, m_waterIndexCount, GL_UNSIGNED_INT, nullptr);
+            const glm::mat3 invWorldRot3x3 = glm::transpose(worldRot3x3); // orthogonal: inverse == transpose
+            glUniformMatrix3fv(waterInvWorldRotLoc, 1, GL_FALSE, glm::value_ptr(invWorldRot3x3));
+            const float reflStrength = m_environmentSettings.enableSun ? m_environmentSettings.waterReflectionStrength : 0.0f;
+            glUniform1f(waterReflectionStrengthLoc, reflStrength);
+
+            // Extract frustum from the water MVP so chunk AABBs (in local mesh space)
+            // can be tested against it.  This culls tiles entirely outside the view.
+            const Frustum waterFrustum = extractFrustum(waterMvp);
+
+            // Pass 1: base water color/alpha only.
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            glUniform1i(waterReflectionOnlyLoc, 0);
+            {
+                const int visibleChunks = m_waterChunkCuller.drawVisible(waterFrustum, GL_TRIANGLES, false);
+                // Each chunk covers kQuadsPerChunk×kQuadsPerChunk quads; each quad has 4 unique verts.
+                m_lastWaterVisibleVertices = visibleChunks
+                    * WaterChunkCuller::kQuadsPerChunk
+                    * WaterChunkCuller::kQuadsPerChunk
+                    * 4;
+            }
+            // Pass 2: isolated reflection, additive and independent from base alpha/fog.
+            glBlendFunc(GL_ONE, GL_ONE);
+            glUniform1i(waterReflectionOnlyLoc, 1);
+            m_waterChunkCuller.drawVisible(waterFrustum, GL_TRIANGLES, false);
             glBindVertexArray(0);
             glEndQuery(GL_TIME_ELAPSED);
 
@@ -1355,7 +1359,9 @@ namespace sparks::render
             const int sunGlowStrengthLocT = glGetUniformLocation(m_texturedProgram, "uSunGlowStrength");
             const int waterEnabledLocT = glGetUniformLocation(m_texturedProgram, "uWaterEnabled");
             const int waterLevelLocT = glGetUniformLocation(m_texturedProgram, "uWaterLevel");
+            const int waterHalfExtentLocT = glGetUniformLocation(m_texturedProgram, "uWaterHalfExtent");
             const int waterTintLocT = glGetUniformLocation(m_texturedProgram, "uWaterTint");
+            const int invWorldLocT = glGetUniformLocation(m_texturedProgram, "uInvWorld");
             const int cameraPosLocT = glGetUniformLocation(m_texturedProgram, "uCameraPos");
             const int fogColorLocT = glGetUniformLocation(m_texturedProgram, "uFogColor");
             const int fogNearLocT = glGetUniformLocation(m_texturedProgram, "uFogNear");
@@ -1387,7 +1393,9 @@ namespace sparks::render
             glUniform1f(sunGlowStrengthLocT, (m_environmentSettings.enableSun ? m_environmentSettings.sunIntensity : 0.0f) * m_environmentSettings.objectSunGlowStrength);
             glUniform1i(waterEnabledLocT, m_environmentSettings.enableWater ? 1 : 0);
             glUniform1f(waterLevelLocT, m_environmentSettings.waterLevel);
+            glUniform1f(waterHalfExtentLocT, m_environmentSettings.waterHalfExtent);
             glUniform3f(waterTintLocT, 0.10f, 0.42f, 0.52f);
+            glUniformMatrix4fv(invWorldLocT, 1, GL_FALSE, glm::value_ptr(inverseWorld));
             glUniform3f(cameraPosLocT, cameraPos.x, cameraPos.y, cameraPos.z);
             glUniform3f(fogColorLocT, m_environmentSettings.fogColor.r, m_environmentSettings.fogColor.g, m_environmentSettings.fogColor.b);
             glUniform1f(fogNearLocT, m_environmentSettings.fogNear);
@@ -1482,7 +1490,7 @@ namespace sparks::render
             glUseProgram(m_shaderProgram);
             const glm::mat4 gridModel(1.0f);
             const glm::mat4 gridMvp = projection * view * world * gridModel;
-            glUniformMatrix4fv(glGetUniformLocation(m_shaderProgram, "uMvp"),   1, GL_FALSE, glm::value_ptr(gridMvp));
+            glUniformMatrix4fv(glGetUniformLocation(m_shaderProgram, "uMvp"), 1, GL_FALSE, glm::value_ptr(gridMvp));
             glUniformMatrix4fv(glGetUniformLocation(m_shaderProgram, "uModel"), 1, GL_FALSE, glm::value_ptr(gridModel));
             glUniform3f(glGetUniformLocation(m_shaderProgram, "uLightPos"),
                         m_environmentSettings.terrainLightDirection.x * 1000.0f,
@@ -1517,10 +1525,9 @@ namespace sparks::render
         }
 
         // ── Underwater post-process pass ─────────────────────────────────────────
-        // Detect whether the effective camera position in scene-local space is
-        // below the flat water plane. The renderer orbits by rotating the world,
-        // so comparing against the pre-rotation camera position produces the wrong
-        // result once the scene is tilted.
+        // Detect whether the actual camera eye point is below the flat water plane.
+        // View orbit is implemented by rotating the world, but that should not
+        // by itself activate underwater post-processing when the user only looks up.
         m_cameraUnderwater = false;
         m_usePostProcessed = false;
         if (m_underwaterProgram != 0 && m_postFbo != 0 && m_postColorTexture != 0 && m_fullscreenVao != 0)
@@ -1531,10 +1538,9 @@ namespace sparks::render
 
             if (m_environmentSettings.enableWater)
             {
-                const glm::mat4 inverseWorld = glm::inverse(world);
-                const glm::vec3 sceneLocalCameraPos = glm::vec3(inverseWorld * glm::vec4(cameraPos, 1.0f));
-                underwaterDepth = m_environmentSettings.waterLevel - sceneLocalCameraPos.y;
-                if (underwaterDepth > 0.01f)
+                const bool insideWaterArea = std::abs(cameraPos.x) <= m_environmentSettings.waterHalfExtent && std::abs(cameraPos.z) <= m_environmentSettings.waterHalfExtent;
+                underwaterDepth = m_environmentSettings.waterLevel - cameraPos.y;
+                if (insideWaterArea && underwaterDepth > 0.30f)
                 {
                     enableUnderwater = true;
                     m_cameraUnderwater = true;
@@ -1612,7 +1618,8 @@ namespace sparks::render
         // Profile reporting every 2 seconds
         perfFrameCount++;
         const auto currentTime = std::chrono::steady_clock::now();
-        if (std::chrono::duration<double>(currentTime - lastPerfTime).count() >= 2.0) {
+        if (std::chrono::duration<double>(currentTime - lastPerfTime).count() >= 2.0)
+        {
             const double avgFrames = std::max(perfFrameCount, 1);
             fprintf(stdout, "[Renderer GPU Profiling] Skydome: %.2f ms, Terrain: %.2f ms, Water: %.2f ms, Import: %.2f ms, Weather: %.2f ms, Total: %.2f ms (avg per frame in 2s)\n",
                     gpuProfileAccumMs[static_cast<int>(GpuProfileSlot::Skydome)] / avgFrames,
@@ -1754,6 +1761,15 @@ namespace sparks::render
         glEnableVertexAttribArray(0);
         m_skydomeIndexCount = static_cast<int>(skyIndices.size());
 
+        // Build per-chunk VAOs for frustum culling (AABBs in unit-sphere local space).
+        {
+            const std::size_t numVerts = skyVertices.size() / 3;
+            std::vector<glm::vec3> skyPositions(numVerts);
+            for (std::size_t i = 0; i < numVerts; ++i)
+                skyPositions[i] = glm::vec3(skyVertices[i * 3], skyVertices[i * 3 + 1], skyVertices[i * 3 + 2]);
+            m_skydomeChunkCuller.initialize(m_skydomeVbo, skyPositions);
+        }
+
         // Generate precomputed star list (matches shader logic)
         m_starList = generateStarList(16, 12); // 16x12 grid, ~100 stars
 
@@ -1815,8 +1831,10 @@ namespace sparks::render
             terrainIndices.reserve(static_cast<std::size_t>(kTerrainN * kTerrainN) * 6);
 
             // Generate indices
-            for (int row = 0; row < kTerrainN; ++row) {
-                for (int col = 0; col < kTerrainN; ++col) {
+            for (int row = 0; row < kTerrainN; ++row)
+            {
+                for (int col = 0; col < kTerrainN; ++col)
+                {
                     const unsigned int base = static_cast<unsigned int>(row * (kTerrainN + 1) + col);
                     terrainIndices.push_back(base);
                     terrainIndices.push_back(base + 1u);
@@ -1838,8 +1856,10 @@ namespace sparks::render
             terrainVerticesFull.reserve((kTerrainN + 1) * (kTerrainN + 1) * 8);
             // Precompute positions for normal calculation
             std::vector<glm::vec3> positions((kTerrainN + 1) * (kTerrainN + 1));
-            for (int row = 0; row <= kTerrainN; ++row) {
-                for (int col = 0; col <= kTerrainN; ++col) {
+            for (int row = 0; row <= kTerrainN; ++row)
+            {
+                for (int col = 0; col <= kTerrainN; ++col)
+                {
                     float x = -kTerrainSize + static_cast<float>(col) * terrainStep;
                     float z = -kTerrainSize + static_cast<float>(row) * terrainStep;
                     // Sample height from diamond-square, scale by patchScale
@@ -1847,8 +1867,10 @@ namespace sparks::render
                     positions[row * (kTerrainN + 1) + col] = glm::vec3(x, y, z);
                 }
             }
-            for (int row = 0; row <= kTerrainN; ++row) {
-                for (int col = 0; col <= kTerrainN; ++col) {
+            for (int row = 0; row <= kTerrainN; ++row)
+            {
+                for (int col = 0; col <= kTerrainN; ++col)
+                {
                     int idx = row * (kTerrainN + 1) + col;
                     glm::vec3 pos = positions[idx];
                     // --- Normal calculation (central differences) ---
@@ -1891,12 +1913,15 @@ namespace sparks::render
             glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * static_cast<int>(sizeof(float)), reinterpret_cast<void *>(6 * sizeof(float)));
             glEnableVertexAttribArray(2);
             m_terrainIndexCount = static_cast<int>(terrainIndices.size());
+
+            // Build per-chunk VAOs for frustum culling (uses actual vertex heights for Y AABB).
+            m_terrainChunkCuller.initialize(m_terrainVbo, positions);
         }
 
         // Water plane – 128×128 subdivided grid for Gerstner wave geometry
         {
             constexpr int kWaterN = 128;
-            constexpr float kTerrainSize = 220.0f; // Match terrain size
+            constexpr float kTerrainSize = kWaterHalfExtent; // Match configured water footprint
             constexpr float kStep = kTerrainSize * 2.0f / static_cast<float>(kWaterN);
 
             std::vector<float> wVerts;
@@ -1942,6 +1967,11 @@ namespace sparks::render
             glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * static_cast<int>(sizeof(float)), nullptr);
             glEnableVertexAttribArray(0);
             m_waterIndexCount = static_cast<int>(wIdx.size());
+
+            // Build per-chunk VAOs for frustum culling.
+            // Max Gerstner wave Y displacement = sum(amplitudes) * waveAmplitude = 2.5 * 0.18 ~= 0.5.
+            // Use 1.0 as a conservative headroom so no visible wave crests are clipped.
+            m_waterChunkCuller.initialize(m_waterVbo, kWaterHalfExtent, 1.0f);
         }
 
         glBindVertexArray(0);

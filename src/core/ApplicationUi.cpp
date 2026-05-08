@@ -205,7 +205,7 @@ glm::vec3 eulerDegreesFromQuatXYZ(const glm::quat& q) {
 
 }  // namespace
 
-void drawStatusBar(const TransformMode transformMode, const bool panModeEnabled, const std::string& importStatus, const float statusBarHeight) {
+void drawStatusBar(const TransformMode transformMode, const bool panModeEnabled, const std::string& importStatus, const float statusBarHeight, const int waterVertices, const int terrainVertices, const int skydomeVertices) {
     ImGui::Separator();
     ImGui::BeginChild("StatusBar", ImVec2(0.0f, statusBarHeight), false, ImGuiWindowFlags_NoScrollbar);
     const char* modeLabel = (transformMode == TransformMode::Move)
@@ -214,10 +214,13 @@ void drawStatusBar(const TransformMode transformMode, const bool panModeEnabled,
     // FPS: get from static/global or pass as argument (here, assume global/static for patch)
     extern float gStatusBarFps; // declare external variable
     ImGui::Text(
-        "Tips: LMB Click=Select | LMB Drag=Box Multi-select | Drag Selected=Transform (%s) | Scroll=Zoom | RMB Drag=Rotate View | WASD=Fly | Q/E=Vertical | Shift=Boost | Ctrl+P=Pan Mode (%s) | FPS: %.1f",
+        "Tips: LMB Click=Select | LMB Drag=Box Multi-select | Drag Selected=Transform (%s) | Scroll=Zoom | RMB Drag=Rotate View | WASD=Fly | Q/E=Vertical | Shift=Boost | Ctrl+P=Pan Mode (%s) | FPS: %.1f | Water Verts: %d | Terrain Verts: %d | Sky Verts: %d",
         modeLabel,
         panModeEnabled ? "ON" : "OFF",
-        gStatusBarFps);
+        gStatusBarFps,
+        waterVertices,
+        terrainVertices,
+        skydomeVertices);
     if (!importStatus.empty()) {
         ImGui::SameLine();
         ImGui::TextUnformatted("|");

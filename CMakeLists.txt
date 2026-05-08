@@ -114,6 +114,7 @@ add_executable(SparksEngine
   src/core/WeatherSystem.cpp
   src/core/Rigging.cpp
   src/render/Renderer.cpp
+  src/render/RendererAstronomy.cpp
   src/render/ShaderFacade.cpp
   src/render/shaders/textured/TexturedProgram.cpp
   src/render/shaders/skydome/SkydomeProgram.cpp
@@ -122,6 +123,9 @@ add_executable(SparksEngine
   src/render/shaders/cloud/CloudProgram.cpp
   src/render/shaders/underwater/UnderwaterProgram.cpp
   src/render/WeatherRenderer.cpp
+  src/render/WaterChunkCuller.cpp
+  src/render/TerrainChunkCuller.cpp
+  src/render/SkydomeChunkCuller.cpp
   src/render/terrain/DiamondSquareTerrain.cpp
   src/render/CloudShadowMap.cpp
   src/render/terrain/TerrainUtils.cpp

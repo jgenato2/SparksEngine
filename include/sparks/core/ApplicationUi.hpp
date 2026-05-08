@@ -28,7 +28,7 @@ enum class TransformAxis {
     View,
 };
 
-void drawStatusBar(TransformMode transformMode, bool panModeEnabled, const std::string& importStatus, float statusBarHeight);
+void drawStatusBar(TransformMode transformMode, bool panModeEnabled, const std::string& importStatus, float statusBarHeight, int waterVertices, int terrainVertices, int skydomeVertices);
 
 void drawSceneTab(
     render::Renderer& renderer,

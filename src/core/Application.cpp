@@ -1043,7 +1043,9 @@ namespace sparks::core
                         {
                             environmentSettings.enableWater = true;
                             environmentSettings.waterLevel = 0.0f;
+                            environmentSettings.waterHalfExtent = 220.0f;
                             environmentSettings.waterColor = glm::vec3(0.12f, 0.44f, 0.60f);
+                            environmentSettings.waterSunStrength = 2.2f;
                             environmentSettings.waterOpacity = 0.34f;
                             environmentSettings.waveAmplitude = 0.09f;
                             environmentSettings.waveFrequency = 1.45f;
@@ -1054,7 +1056,9 @@ namespace sparks::core
                         {
                             environmentSettings.enableWater = true;
                             environmentSettings.waterLevel = 0.0f;
+                            environmentSettings.waterHalfExtent = 220.0f;
                             environmentSettings.waterColor = glm::vec3(0.09f, 0.32f, 0.52f);
+                            environmentSettings.waterSunStrength = 3.0f;
                             environmentSettings.waterOpacity = 0.46f;
                             environmentSettings.waveAmplitude = 0.26f;
                             environmentSettings.waveFrequency = 2.35f;
@@ -1064,8 +1068,10 @@ namespace sparks::core
                         ImGui::Separator();
                         envChanged |= ImGui::Checkbox("Enable Water", &environmentSettings.enableWater);
                         envChanged |= ImGui::SliderFloat("Water Level", &environmentSettings.waterLevel, -10.0f, 10.0f, "%.2f");
+                        envChanged |= ImGui::SliderFloat("Water Area", &environmentSettings.waterHalfExtent, 20.0f, 4000.0f, "%.1f");
                         envChanged |= ImGui::ColorEdit3("Water Color", &environmentSettings.waterColor.x);
                         envChanged |= ImGui::SliderFloat("Water Opacity", &environmentSettings.waterOpacity, 0.1f, 1.0f, "%.2f");
+                        envChanged |= ImGui::SliderFloat("Reflection Strength", &environmentSettings.waterReflectionStrength, 0.0f, 3.0f, "%.2f");
                         envChanged |= ImGui::SliderFloat("Wave Amplitude", &environmentSettings.waveAmplitude, 0.0f, 1.0f, "%.3f");
                         envChanged |= ImGui::SliderFloat("Wave Frequency", &environmentSettings.waveFrequency, 0.1f, 5.0f, "%.2f");
                         envChanged |= ImGui::SliderFloat("Foam Intensity", &environmentSettings.waterFoamIntensity, 0.0f, 2.0f, "%.2f");
@@ -1244,7 +1250,7 @@ namespace sparks::core
 
             ui::drawRightPane(contentHeight, io, renderer, environmentSettings, selectedCloudIndices, importedModel, importedModelSelected);
 
-            ui::drawStatusBar(transformMode, panModeEnabled, importStatus, statusBarHeight);
+            ui::drawStatusBar(transformMode, panModeEnabled, importStatus, statusBarHeight, renderer.lastWaterVisibleVertices(), renderer.lastTerrainVisibleVertices(), renderer.lastSkydomeVisibleVertices());
 
             ImGui::End();
 
