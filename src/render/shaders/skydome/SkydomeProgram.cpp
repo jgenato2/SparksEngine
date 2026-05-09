@@ -47,6 +47,10 @@ unsigned int createSkydomeProgram() {
         uniform float uTime;
         uniform sampler2D uSkyTex;
         uniform int uUseTexture;
+        uniform vec3 uUnderseaTint;
+        uniform vec3 uUnderseaDeepColor;
+        uniform int uUnderseaEnabled;
+        uniform int uCameraUnderwater;
         // Remove uStarDensity, use fixed star count
 
         float hash21(vec2 p) {
@@ -174,6 +178,17 @@ unsigned int createSkydomeProgram() {
             vec3 skyDir = normalize(vLocalPos);
             vec3 sunDir = normalize(uSunDir);
             float sunDot = max(dot(skyDir, sunDir), 0.0);
+
+            // Lower hemisphere: replace mirrored sky/cloud artifacts with an
+            // undersea-style gradient when water rendering is enabled.
+            if (uUnderseaEnabled == 1 && uCameraUnderwater == 1 && skyDir.y < 0.0) {
+                float lower = clamp(-skyDir.y, 0.0, 1.0);
+                vec3 nearBlue = mix(uUnderseaTint, vec3(0.06, 0.44, 0.68), 0.50);
+                vec3 deepColor = mix(nearBlue, uUnderseaDeepColor, smoothstep(0.10, 1.0, lower));
+                vec3 gradient = mix(nearBlue * 1.12, deepColor * 0.28, smoothstep(0.0, 1.0, lower));
+                FragColor = vec4(gradient, 1.0);
+                return;
+            }
 
             // Use the configured sky gradient instead of forcing a saturated blue zenith.
             vec3 skyGradient = mix(uHorizonColor, uZenithColor, pow(h, 0.72));

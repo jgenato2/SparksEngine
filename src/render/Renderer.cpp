@@ -784,6 +784,8 @@ namespace sparks::render
         m_environmentSettings.sunIntensity = glm::clamp(m_environmentSettings.sunIntensity, 0.0f, 4.0f);
         m_environmentSettings.waterSunStrength = glm::clamp(m_environmentSettings.waterSunStrength, 0.0f, 6.0f);
         m_environmentSettings.waterReflectionStrength = glm::clamp(m_environmentSettings.waterReflectionStrength, 0.0f, 3.0f);
+        m_environmentSettings.waterDarknessColor = glm::clamp(m_environmentSettings.waterDarknessColor, glm::vec3(0.0f), glm::vec3(1.0f));
+        m_environmentSettings.underwaterDeepDepth = glm::clamp(m_environmentSettings.underwaterDeepDepth, 0.5f, 100.0f);
         m_environmentSettings.sunHeatStrength = glm::clamp(m_environmentSettings.sunHeatStrength, 0.0f, 3.0f);
         m_environmentSettings.dustAmount = glm::clamp(m_environmentSettings.dustAmount, 0.0f, 1.5f);
         m_environmentSettings.sunRayStrength = glm::clamp(m_environmentSettings.sunRayStrength, 0.0f, 2.5f);

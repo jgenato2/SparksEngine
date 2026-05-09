@@ -165,6 +165,46 @@ void Renderer::createTerrainResources()
         }
     }
 
+    // Smooth the generated heightfield to reduce jagged facets.
+    {
+        const int side = kTerrainN + 1;
+        std::vector<float> smoothed(static_cast<std::size_t>(side * side));
+        constexpr int kSmoothPasses = 2;
+        for (int pass = 0; pass < kSmoothPasses; ++pass)
+        {
+            for (int row = 0; row < side; ++row)
+            {
+                for (int col = 0; col < side; ++col)
+                {
+                    float sum = 0.0f;
+                    int count = 0;
+                    for (int dr = -1; dr <= 1; ++dr)
+                    {
+                        const int rr = row + dr;
+                        if (rr < 0 || rr >= side)
+                            continue;
+                        for (int dc = -1; dc <= 1; ++dc)
+                        {
+                            const int cc = col + dc;
+                            if (cc < 0 || cc >= side)
+                                continue;
+                            sum += positions[rr * side + cc].y;
+                            ++count;
+                        }
+                    }
+                    const std::size_t idx = static_cast<std::size_t>(row * side + col);
+                    const float avg = sum / static_cast<float>(std::max(count, 1));
+                    // Preserve some original form while smoothing.
+                    smoothed[idx] = glm::mix(positions[idx].y, avg, 0.55f);
+                }
+            }
+            for (int i = 0; i < side * side; ++i)
+            {
+                positions[i].y = smoothed[static_cast<std::size_t>(i)];
+            }
+        }
+    }
+
     // Each vertex: 3 pos + 3 normal + 2 uv = 8 floats
     std::vector<float> terrainVerticesFull;
     terrainVerticesFull.reserve((kTerrainN + 1) * (kTerrainN + 1) * 8);

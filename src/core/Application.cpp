@@ -1071,6 +1071,8 @@ namespace sparks::core
                         envChanged |= ImGui::SliderFloat("Water Area", &environmentSettings.waterHalfExtent, 20.0f, 4000.0f, "%.1f");
                         envChanged |= ImGui::ColorEdit3("Water Color", &environmentSettings.waterColor.x);
                         envChanged |= ImGui::SliderFloat("Water Opacity", &environmentSettings.waterOpacity, 0.1f, 1.0f, "%.2f");
+                        envChanged |= ImGui::ColorEdit3("Water Darkness", &environmentSettings.waterDarknessColor.x);
+                        envChanged |= ImGui::SliderFloat("Deep Sea Depth", &environmentSettings.underwaterDeepDepth, 0.5f, 100.0f, "%.1f m");
                         envChanged |= ImGui::SliderFloat("Reflection Strength", &environmentSettings.waterReflectionStrength, 0.0f, 3.0f, "%.2f");
                         envChanged |= ImGui::SliderFloat("Wave Amplitude", &environmentSettings.waveAmplitude, 0.0f, 1.0f, "%.3f");
                         envChanged |= ImGui::SliderFloat("Wave Frequency", &environmentSettings.waveFrequency, 0.1f, 5.0f, "%.2f");
@@ -1182,9 +1184,14 @@ namespace sparks::core
             {
                 leftPaneWidth = workspaceSize.x * 0.72f;
             }
-            leftPaneWidth = std::clamp(leftPaneWidth, 200.0f, workspaceSize.x - 220.0f);
+            const float leftPaneMin = 200.0f;
+            const float leftPaneMax = std::max(leftPaneMin, workspaceSize.x - 220.0f);
+            const bool canResizeLeftPane = (workspaceSize.x - 220.0f) >= leftPaneMin;
+            const float effectiveLeftPaneWidth = canResizeLeftPane
+                ? std::clamp(leftPaneWidth, leftPaneMin, leftPaneMax)
+                : std::max(1.0f, workspaceSize.x * 0.5f);
 
-            ImGui::BeginChild("ViewportPane", ImVec2(leftPaneWidth, contentHeight), true);
+            ImGui::BeginChild("ViewportPane", ImVec2(effectiveLeftPaneWidth, contentHeight), true);
             {
                 if (ImGui::BeginTabBar("SceneTabs"))
                 {
@@ -1243,7 +1250,10 @@ namespace sparks::core
             }
             if (ImGui::IsItemActive())
             {
-                leftPaneWidth = std::clamp(leftPaneWidth + io.MouseDelta.x, 200.0f, workspaceSize.x - 220.0f);
+                if (canResizeLeftPane)
+                {
+                    leftPaneWidth = std::clamp(leftPaneWidth + io.MouseDelta.x, leftPaneMin, leftPaneMax);
+                }
             }
 
             ImGui::SameLine();

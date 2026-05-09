@@ -1656,7 +1656,12 @@ void drawRightPane(
     static float hierarchyHeight = 170.0f;
     static std::optional<render::ImportedModelData> importedModelClipboard;
     static std::vector<render::CloudObjectSettings> cloudClipboard;
-    hierarchyHeight = std::clamp(hierarchyHeight, 110.0f, contentHeight - 140.0f);
+    const float hierarchyMin = 110.0f;
+    const float hierarchyMax = std::max(hierarchyMin, contentHeight - 140.0f);
+    const bool canResizeHierarchy = (contentHeight - 140.0f) >= hierarchyMin;
+    const float effectiveHierarchyHeight = canResizeHierarchy
+        ? std::clamp(hierarchyHeight, hierarchyMin, hierarchyMax)
+        : std::max(1.0f, contentHeight * 0.35f);
 
     auto copySelectedObjects = [&]() {
         importedModelClipboard.reset();
@@ -1720,7 +1725,7 @@ void drawRightPane(
         pasteObjects();
     }
 
-    ImGui::BeginChild("HierarchyPane", ImVec2(0.0f, hierarchyHeight), true);
+    ImGui::BeginChild("HierarchyPane", ImVec2(0.0f, effectiveHierarchyHeight), true);
     ImGui::TextUnformatted("Hierarchy");
     ImGui::Separator();
     if (importedModel.has_value()) {
@@ -1780,7 +1785,9 @@ void drawRightPane(
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
     }
     if (ImGui::IsItemActive()) {
-        hierarchyHeight = std::clamp(hierarchyHeight + io.MouseDelta.y, 110.0f, contentHeight - 140.0f);
+        if (canResizeHierarchy) {
+            hierarchyHeight = std::clamp(hierarchyHeight + io.MouseDelta.y, hierarchyMin, hierarchyMax);
+        }
     }
 
     ImGui::BeginChild("PropertiesPane", ImVec2(0.0f, contentHeight), true);

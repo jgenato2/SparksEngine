@@ -56,6 +56,20 @@ void Renderer::renderSkydome(const RenderContext &ctx, unsigned int gpuQuery)
     const int skyWindDirectionLoc     = glGetUniformLocation(m_skydomeProgram, "uWindDirection");
     const int skyWindSpeedLoc         = glGetUniformLocation(m_skydomeProgram, "uWindSpeed");
     const int skyTimeLoc              = glGetUniformLocation(m_skydomeProgram, "uTime");
+    const int skyUnderseaTintLoc      = glGetUniformLocation(m_skydomeProgram, "uUnderseaTint");
+    const int skyUnderseaDeepLoc      = glGetUniformLocation(m_skydomeProgram, "uUnderseaDeepColor");
+    const int skyUnderseaEnableLoc    = glGetUniformLocation(m_skydomeProgram, "uUnderseaEnabled");
+    const int skyCameraUnderwaterLoc  = glGetUniformLocation(m_skydomeProgram, "uCameraUnderwater");
+
+    bool cameraUnderwater = false;
+    if (m_environmentSettings.enableWater)
+    {
+        const bool insideWaterArea =
+            std::abs(ctx.cameraPos.x) <= m_environmentSettings.waterHalfExtent &&
+            std::abs(ctx.cameraPos.z) <= m_environmentSettings.waterHalfExtent;
+        const float depth = m_environmentSettings.waterLevel - ctx.cameraPos.y;
+        cameraUnderwater = insideWaterArea && depth > 0.30f;
+    }
 
     const float sunDiscSize     = m_environmentSettings.enableSun ? m_environmentSettings.sunDiscSize     : 0.0f;
     const float sunIntensity    = m_environmentSettings.enableSun ? m_environmentSettings.sunIntensity    : 0.0f;
@@ -82,6 +96,10 @@ void Renderer::renderSkydome(const RenderContext &ctx, unsigned int gpuQuery)
     glUniform2f(skyWindDirectionLoc,     m_environmentSettings.windDirection.x, m_environmentSettings.windDirection.y);
     glUniform1f(skyWindSpeedLoc,         m_environmentSettings.windSpeed);
     glUniform1f(skyTimeLoc,              ctx.elapsedSeconds);
+    glUniform3f(skyUnderseaTintLoc,      m_environmentSettings.waterColor.r, m_environmentSettings.waterColor.g, m_environmentSettings.waterColor.b);
+    glUniform3f(skyUnderseaDeepLoc,      m_environmentSettings.waterDarknessColor.r, m_environmentSettings.waterDarknessColor.g, m_environmentSettings.waterDarknessColor.b);
+    glUniform1i(skyUnderseaEnableLoc,    m_environmentSettings.enableWater ? 1 : 0);
+    glUniform1i(skyCameraUnderwaterLoc,  cameraUnderwater ? 1 : 0);
 
     const int skyStarDensityLoc = glGetUniformLocation(m_skydomeProgram, "uStarDensity");
     glUniform1f(skyStarDensityLoc, m_environmentSettings.starDensity);
@@ -388,6 +406,13 @@ void Renderer::renderPostProcess(const RenderContext &ctx)
     m_cameraUnderwater  = false;
     m_usePostProcessed  = false;
 
+    float dt = 1.0f / 60.0f;
+    if (m_lastPostProcessElapsed >= 0.0f)
+    {
+        dt = glm::clamp(ctx.elapsedSeconds - m_lastPostProcessElapsed, 0.0f, 0.2f);
+    }
+    m_lastPostProcessElapsed = ctx.elapsedSeconds;
+
     if (m_underwaterProgram == 0 || m_postFbo == 0 ||
         m_postColorTexture == 0 || m_fullscreenVao == 0)
         return;
@@ -407,6 +432,23 @@ void Renderer::renderPostProcess(const RenderContext &ctx)
             enableUnderwater   = true;
             m_cameraUnderwater = true;
         }
+    }
+
+    if (enableUnderwater)
+    {
+        // Enter quickly so the effect tracks descent, but do not hard-reset on re-entry.
+        const float riseRate = 8.0f;
+        const float delta = underwaterDepth - m_underwaterVisualDepth;
+        const float step = riseRate * dt;
+        if (delta > step)
+            m_underwaterVisualDepth += step;
+        else
+            m_underwaterVisualDepth = underwaterDepth;
+    }
+    else
+    {
+        // Decay slowly while above water so brief resurfaces keep depth continuity.
+        m_underwaterVisualDepth = glm::max(0.0f, m_underwaterVisualDepth - 2.0f * dt);
     }
 
     if (!enableUnderwater && !wantCinematic)
@@ -444,8 +486,10 @@ void Renderer::renderPostProcess(const RenderContext &ctx)
     glBindTexture(GL_TEXTURE_2D, m_colorTexture);
     glUniform1i(glGetUniformLocation(m_underwaterProgram, "uSceneTex"),        0);
     glUniform1f(glGetUniformLocation(m_underwaterProgram, "uTime"),            static_cast<float>(glfwGetTime()));
-    glUniform1f(glGetUniformLocation(m_underwaterProgram, "uDepth"),           enableUnderwater ? underwaterDepth : 0.0f);
+    glUniform1f(glGetUniformLocation(m_underwaterProgram, "uDepth"),           enableUnderwater ? m_underwaterVisualDepth : 0.0f);
+    glUniform1f(glGetUniformLocation(m_underwaterProgram, "uDeepSeaDepth"),    m_environmentSettings.underwaterDeepDepth);
     glUniform3f(glGetUniformLocation(m_underwaterProgram, "uWaterTint"),       m_environmentSettings.waterColor.r, m_environmentSettings.waterColor.g, m_environmentSettings.waterColor.b);
+    glUniform3f(glGetUniformLocation(m_underwaterProgram, "uDeepColor"),        m_environmentSettings.waterDarknessColor.r, m_environmentSettings.waterDarknessColor.g, m_environmentSettings.waterDarknessColor.b);
     glUniform2f(glGetUniformLocation(m_underwaterProgram, "uSunUv"),           sunUv.x, sunUv.y);
     glUniform1f(glGetUniformLocation(m_underwaterProgram, "uSunVisible"),      sunVisible);
     glUniform1i(glGetUniformLocation(m_underwaterProgram, "uUnderwaterEnabled"), enableUnderwater ? 1 : 0);

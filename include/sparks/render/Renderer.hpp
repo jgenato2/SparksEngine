@@ -163,6 +163,8 @@ struct EnvironmentSettings {
     float waterHalfExtent{220.0f};
     glm::vec3 waterColor{0.10f, 0.36f, 0.54f};
     float waterOpacity{0.42f};
+    glm::vec3 waterDarknessColor{0.02f, 0.06f, 0.18f};
+    float underwaterDeepDepth{3.0f};
     float waterReflectionStrength{1.0f};
     float waveAmplitude{0.18f};
     float waveFrequency{2.0f};
@@ -286,6 +288,8 @@ private:
     unsigned int m_postColorTexture{0};
     bool m_cameraUnderwater{false};
     bool m_usePostProcessed{false};
+    float m_underwaterVisualDepth{0.0f};
+    float m_lastPostProcessElapsed{-1.0f};
 
     unsigned int m_cloudProgram{0};
     unsigned int m_cloudVao{0};
